@@ -70,8 +70,24 @@ services:
       context: .
       target: builder
     command: npx prisma migrate deploy
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
+    # The FULL environment, not just DATABASE_URL.
+    #
+    # This service also runs the seed script, which changes behaviour based on
+    # NODE_ENV: in production it demands SEED_ADMIN_EMAIL/PASSWORD and refuses
+    # to fall back to a documented default password.
+    #
+    # When only DATABASE_URL was passed, NODE_ENV was undefined inside this
+    # container, so the seed believed it was running in development and created
+    # an administrator with the publicly-known default password — on a server
+    # exposed to the internet. The guard was intact; the variable it depends on
+    # simply never arrived.
+    #
+    # The lesson: a security check is only as good as the inputs it receives.
+    # When behaviour depends on configuration, make sure that configuration
+    # actually reaches the process — a guard reading an undefined variable
+    # fails open and says nothing.
+    env_file:
+      - .env.production
     depends_on:
       postgres:
         condition: service_healthy
