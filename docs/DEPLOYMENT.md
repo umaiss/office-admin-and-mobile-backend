@@ -98,6 +98,33 @@ docker compose version
 > Installed system-wide rather than in `~/.docker/cli-plugins` so it also works
 > under `sudo`, which matters the first time you debug something as root.
 
+### buildx
+
+Compose v2 delegates image building to **buildx**, which Amazon Linux also
+omits. Without it every build fails with:
+
+```
+compose build requires buildx 0.17.0 or later
+```
+
+Note the architecture naming differs from Compose — buildx uses `amd64`/`arm64`
+where Compose uses `x86_64`/`aarch64`, which is why the command below maps it
+rather than reusing `uname -m` directly:
+
+```bash
+BX_ARCH=$( [ "$(uname -m)" = "aarch64" ] && echo arm64 || echo amd64 ) && BX_VER=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1) && sudo curl -SL "https://github.com/docker/buildx/releases/download/${BX_VER}/buildx-${BX_VER}.linux-${BX_ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-buildx && sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+```
+
+Verify:
+
+```bash
+docker buildx version
+```
+
+> If the GitHub API call is rate-limited (60 unauthenticated requests per hour
+> per IP), substitute a fixed version for `${BX_VER}` — for example `v0.20.1` —
+> and download that URL directly.
+
 ### Swap
 
 Check how much memory you actually have:
@@ -287,6 +314,58 @@ It also **builds before stopping anything**, so a broken build leaves the runnin
 | Stop everything | `docker compose --env-file .env.production down` |
 | Database shell | `docker compose --env-file .env.production exec postgres psql -U obtrack -d obtrack` |
 | Disk usage | `df -h && docker system df` |
+
+### Connecting DBeaver (or any SQL client) to the server database
+
+**Never open port 5432 in the security group.** Tunnel over SSH instead: the
+connection travels over port 22, is encrypted, and requires your private key.
+An exposed Postgres port is found by scanners within minutes of being opened.
+
+Postgres is published on `127.0.0.1:5432` on the instance — the loopback
+interface only — which is what an SSH tunnel can reach and the internet cannot.
+
+**[ec2]** Get the password you set:
+
+```bash
+grep POSTGRES_PASSWORD .env.production
+```
+
+Then in DBeaver, create a **PostgreSQL** connection:
+
+*Main* tab — note these describe the database **as seen from the EC2 instance**,
+because the tunnel terminates there:
+
+| Field | Value |
+|---|---|
+| Host | `localhost` |
+| Port | `5432` |
+| Database | `obtrack` |
+| Username | `obtrack` |
+| Password | from the command above |
+
+*SSH* tab — tick **Use SSH Tunnel**:
+
+| Field | Value |
+|---|---|
+| Host/IP | your EC2 public IP |
+| Port | `22` |
+| User Name | `ec2-user` |
+| Authentication Method | Public Key |
+| Private Key | your `.pem` file |
+
+Click **Test Connection**. If it fails at the SSH step, the security group is
+not allowing port 22 from your current IP — a home connection's IP changes,
+so a rule added last week may no longer match.
+
+Prefer the command line? Same tunnel, run from your own machine:
+
+```bash
+ssh -i your-key.pem -L 5432:localhost:5432 ec2-user@YOUR_EC2_IP
+```
+
+Leave that running and point any client at `localhost:5432`. If your own
+machine already runs Postgres on 5432, use `-L 5433:localhost:5432` and connect
+to port 5433 instead.
 
 ### Back up the database
 

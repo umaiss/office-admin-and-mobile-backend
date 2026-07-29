@@ -26,18 +26,26 @@ services:
       # written inside a container disappears when it is replaced, which happens
       # on every deploy. Without this line, deploying would wipe your database.
       - postgres_data:/var/lib/postgresql/data
-    # NOT `ports: 5432:5432`.
-    #
-    # Publishing a port binds it on ALL interfaces, which on EC2 means the
-    # public internet — and automated scanners find open Postgres ports within
-    # minutes. The api container reaches the database over the private compose
-    # network by hostname, so no published port is needed at all.
-    #
-    # To inspect the database from your laptop, use an SSH tunnel:
-    #   ssh -L 5432:localhost:5432 ubuntu@<ec2-ip>
-    # combined with the commented-out binding below.
-    # ports:
-    #   - '127.0.0.1:5432:5432'
+    ports:
+      # NOTE THE `127.0.0.1:` PREFIX — it is the entire security control here.
+      #
+      #   '5432:5432'            binds every interface, including the EC2
+      #                          instance's PUBLIC one. Your database would be
+      #                          reachable from the internet, and automated
+      #                          scanners find open Postgres ports within
+      #                          minutes. Never do this.
+      #
+      #   '127.0.0.1:5432:5432'  binds the loopback interface only. Reachable
+      #                          from processes ON the instance — which
+      #                          includes an SSH tunnel — and from nowhere else.
+      #
+      # This exists so tools like DBeaver can reach the database THROUGH an SSH
+      # tunnel. The security group must still keep 5432 closed; the tunnel
+      # travels over port 22, encrypted, and needs your private key.
+      #
+      # The api container does not use this at all — it reaches Postgres over
+      # the private compose network by hostname.
+      - '127.0.0.1:5432:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 10s
