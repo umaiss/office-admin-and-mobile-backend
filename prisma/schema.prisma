@@ -1,0 +1,398 @@
+// ============================================================================
+//  OB Track — database schema
+// ============================================================================
+//  Conventions used throughout this file:
+//
+//  1. UNITS LIVE IN NAMES. `distanceMeters`, not `distance`. A field called
+//     `distance` will eventually be read as kilometres by someone, and the bug
+//     will be silent. The name is the documentation.
+//
+//  2. TIMES ARE UTC, ALWAYS. Conversion to local time happens at the edges
+//     (the mobile app, the dashboard), never in the database.
+//
+//  3. CLIENT-GENERATED IDS FOR ANYTHING SYNCED OFFLINE. See `clientId` on
+//     TaskLocation for why this is not optional.
+//
+//  4. INDEXES MATCH REAL QUERIES. Every @@index below exists because a screen
+//     or report will filter on exactly those columns, in that order. Indexes
+//     are not free — each one slows writes — so we do not add them "just in
+//     case".
+// ============================================================================
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+//  Enums
+// ============================================================================
+
+enum Role {
+  ADMIN
+  OFFICE_BOY
+}
+
+/// The task lifecycle. Transitions are enforced in code (Phase 4), not here —
+/// a database cannot express "PENDING may become IN_PROGRESS but COMPLETED may
+/// not become anything".
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+  HALF_DAY
+}
+
+enum NotificationType {
+  TASK_STARTED
+  TASK_COMPLETED
+  TASK_CANCELLED
+  ATTENDANCE_CHECK_IN
+  ATTENDANCE_CHECK_OUT
+  SYSTEM
+}
+
+// ============================================================================
+//  User
+// ============================================================================
+
+/// Both admins and office boys are Users, separated by `role`.
+///
+/// Why one table instead of an `Admin` table and an `OfficeBoy` table? Because
+/// authentication, passwords, and refresh tokens are identical for both. Two
+/// tables would mean two login flows, two password-reset paths, and a
+/// permanent risk of them drifting apart. The differences between the roles
+/// live in what they are *allowed to do*, which is authorisation — code, not
+/// schema.
+model User {
+  id       String  @id @default(uuid())
+  name     String
+  email    String  @unique
+  /// bcrypt hash. Never the plaintext, and never returned by any API.
+  password String
+  phone    String?
+
+  role     Role
+  /// Deactivation instead of deletion. An office boy with 400 historical tasks
+  /// cannot be deleted without either destroying that history or breaking the
+  /// foreign keys that point at them. For people, deactivate — never delete.
+  isActive Boolean @default(true)
+
+  /// Powers the dashboard's "who is currently active" view.
+  lastLoginAt DateTime?
+
+  tasks         Task[]
+  attendances   Attendance[]
+  notifications Notification[]
+  refreshTokens RefreshToken[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// `email` already has a unique index from @unique — a second index on it
+  /// would cost write performance and buy nothing.
+  /// This composite serves the main admin screen: "list active office boys".
+  @@index([role, isActive])
+}
+
+// ============================================================================
+//  Task
+// ============================================================================
+
+model Task {
+  id String @id @default(uuid())
+
+  /// Idempotency key for tasks created while offline.
+  ///
+  /// The mobile app generates this UUID at the moment the office boy taps
+  /// "create", before any network call. If the upload is retried — and over a
+  /// mobile connection it will be — the server recognises the id and updates
+  /// the existing row instead of creating a duplicate task.
+  ///
+  /// Nullable because tasks created directly from the admin dashboard are
+  /// online by definition and need no key.
+  clientTaskId String? @unique
+
+  title       String
+  description String
+  destination String?
+
+  status TaskStatus @default(PENDING)
+
+  officeBoyId String
+  officeBoy   User   @relation(fields: [officeBoyId], references: [id], onDelete: Restrict)
+
+  // ---- Lifecycle timestamps ----
+  startedAt   DateTime?
+  endedAt     DateTime?
+  cancelledAt DateTime?
+
+  cancellationReason String?
+
+  // ---- Start and end positions ----
+  // Denormalised onto the task even though they also exist in TaskLocation.
+  // Every task list screen shows "from → to"; without these, rendering one
+  // page of 20 tasks would mean 40 extra lookups into a table with millions
+  // of rows. Storing the two endpoints is the cheaper trade.
+  startLatitude  Float?
+  startLongitude Float?
+  endLatitude    Float?
+  endLongitude   Float?
+
+  // ---- Derived totals ----
+  // Computed when the task ends (Phase 5) and cached here so that reports do
+  // not have to re-walk the location history every time they run.
+  distanceMeters  Float?
+  durationSeconds Int?
+
+  locations     TaskLocation[]
+  route         Route?
+  notifications Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// "Show me this office boy's in-progress tasks" — the mobile app's home
+  /// screen, and the dashboard's live-activity panel.
+  @@index([officeBoyId, status])
+  /// "Show me this office boy's tasks for this date range" — every report.
+  @@index([officeBoyId, createdAt])
+  /// "Show me all active tasks across everyone" — the admin dashboard KPI.
+  @@index([status, createdAt])
+}
+
+// ============================================================================
+//  TaskLocation
+// ============================================================================
+
+/// One GPS reading. This is the highest-volume table in the system: a single
+/// eight-hour shift sampled every ten seconds produces ~2,880 rows per office
+/// boy per day.
+model TaskLocation {
+  id String @id @default(uuid())
+
+  /// Idempotency key generated on the device. REQUIRED — this is the field
+  /// that makes offline sync safe.
+  ///
+  /// Without it: the phone uploads 50 points, the server saves them, the
+  /// response is lost in a lift, the phone assumes failure and re-uploads.
+  /// Now there are 100 rows for 50 real positions and the office boy's
+  /// distance report reads double. With it, the server upserts on this key and
+  /// the retry is harmless.
+  ///
+  /// Retries are not an edge case on mobile networks. They are the norm.
+  clientId String @unique
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  latitude  Float
+  longitude Float
+
+  // ---- Quality signals, used by the Phase 5 noise filter ----
+  /// Radius of uncertainty in metres. A reading of 200 means "somewhere within
+  /// 200m of here" — useless for distance, and discarded.
+  accuracyMeters       Float?
+  altitudeMeters       Float?
+  speedMetersPerSecond Float?
+  headingDegrees       Float?
+  /// Reported by the OS. A phone that says it is stationary should not
+  /// contribute distance, however much its coordinates wobble.
+  isMoving             Boolean?
+  /// Helps diagnose gaps in tracking: battery-saver mode throttles GPS.
+  batteryLevel         Int?
+
+  /// When the DEVICE captured this reading. Supplied by the client, required.
+  /// This is the timestamp used for ordering and for distance calculation.
+  recordedAt DateTime
+  /// When the SERVER received it. With offline sync these two can differ by
+  /// hours. Keeping both is what lets us distinguish "the office boy stood
+  /// still" from "the phone had no signal" — and device clocks can be wrong or
+  /// deliberately changed, so anything trustworthy must be measured from this
+  /// one.
+  receivedAt DateTime @default(now())
+
+  /// Set by the noise filter when this point was excluded from the distance
+  /// total. We keep the row rather than deleting it so that a filtering bug
+  /// can be corrected and the totals recomputed from the original data.
+  isFiltered Boolean @default(false)
+
+  /// Ordering points within a task — the single most common query against
+  /// this table, used by both distance calculation and route rendering.
+  @@index([taskId, recordedAt])
+  /// Finding recently-synced data when debugging a device.
+  @@index([receivedAt])
+}
+
+// ============================================================================
+//  Route
+// ============================================================================
+
+/// The computed path of a completed task.
+///
+/// Separate from Task because it is written once at task completion and read
+/// only when someone opens the map view. Keeping it out of Task means the
+/// (potentially large) polyline is not loaded every time a task list is
+/// fetched.
+model Route {
+  id String @id @default(uuid())
+
+  taskId String @unique
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  /// Google-style encoded polyline. A 2,000-point route is roughly 12KB
+  /// encoded versus ~90KB as raw JSON coordinates — the difference between a
+  /// map that loads instantly on mobile data and one that does not.
+  encodedPolyline String
+
+  /// Cached totals, so the map view needs no computation at all.
+  distanceMeters Float
+  /// Points that survived filtering, out of `rawPointCount` collected.
+  pointCount     Int
+  rawPointCount  Int
+
+  computedAt DateTime @default(now())
+}
+
+// ============================================================================
+//  Attendance
+// ============================================================================
+
+model Attendance {
+  id String @id @default(uuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// The calendar day this record belongs to, stored as a DATE (no time).
+  /// A timestamp would make "find today's record" depend on the exact instant
+  /// and quietly fail across timezones.
+  date DateTime @db.Date
+
+  checkInAt  DateTime?
+  checkOutAt DateTime?
+
+  checkInLatitude   Float?
+  checkInLongitude  Float?
+  checkOutLatitude  Float?
+  checkOutLongitude Float?
+
+  status AttendanceStatus @default(ABSENT)
+
+  /// Derived on check-out.
+  workedSeconds Int?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The important constraint in this model: one attendance record per person
+  /// per day. Enforced by the DATABASE, not by application code — because two
+  /// simultaneous check-in requests can both pass an application-level "does a
+  /// record exist?" check and both insert. Only a unique constraint makes that
+  /// race impossible.
+  @@unique([userId, date])
+  /// "Everyone's attendance for this date" — the daily admin report.
+  @@index([date])
+}
+
+// ============================================================================
+//  Notification
+// ============================================================================
+
+/// Persisted notifications.
+///
+/// These are stored even though Phase 7 will also push them over WebSockets.
+/// A push only reaches clients that are connected at that moment; anyone
+/// offline would never learn about the event. Persist first, push second.
+model Notification {
+  id String @id @default(uuid())
+
+  /// The recipient.
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    NotificationType
+  title   String
+  message String
+
+  /// Lets the client deep-link straight to the relevant task. SetNull rather
+  /// than Cascade: if the task is removed, the notification remains as a
+  /// historical record, it just stops linking anywhere.
+  taskId String?
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  isRead Boolean   @default(false)
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// Powers the unread badge count — the single most frequent query here.
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+}
+
+// ============================================================================
+//  RefreshToken
+// ============================================================================
+
+/// A refresh token is a revocable, long-lived credential.
+///
+/// Access tokens (JWTs) are stateless: the server does not store them, cannot
+/// revoke them, and therefore keeps them short-lived. Refresh tokens are the
+/// opposite — stored, revocable, long-lived. That split is the whole design:
+/// speed on every request, control when it matters.
+///
+/// The extra columns here exist for the Phase 2 rotation scheme. They are
+/// added now, while the table has one row, rather than later when it has
+/// thousands.
+model RefreshToken {
+  id String @id @default(uuid())
+
+  /// bcrypt hash of the token secret — never the token itself. If this table
+  /// leaks, the attacker still cannot authenticate.
+  ///
+  /// The token handed to the client is `<id>.<secret>`. Including the row id
+  /// lets the server find the one row to check with a primary-key lookup,
+  /// instead of bcrypt-comparing against every token the user has ever been
+  /// issued.
+  hashedToken String
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+
+  /// Rotation: set when this token is used or explicitly revoked.
+  /// Rows are marked rather than deleted so that a *reused* token can still be
+  /// recognised — if an already-rotated token comes back, two parties hold it,
+  /// which means one of them stole it.
+  revokedAt         DateTime?
+  /// The token issued in place of this one. Forms a chain, so detecting reuse
+  /// anywhere in it lets us revoke the entire session.
+  replacedByTokenId String?
+
+  /// Device identification, so "log out this phone" does not mean "log out
+  /// every device I own".
+  userAgent String?
+  ipAddress String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  /// For the scheduled cleanup of expired rows.
+  @@index([expiresAt])
+}

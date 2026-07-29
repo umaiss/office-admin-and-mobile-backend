@@ -1,0 +1,13 @@
+{
+  // End-to-end tests live outside src/, so they are not part of the main
+  // program (whose rootDir is src/). This project file exists so that tooling —
+  // ESLint's type-aware rules and ts-jest — can still type-check them against
+  // the application's source.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../",
+    "noEmit": true,
+    "incremental": false
+  },
+  "include": ["./**/*.ts", "../src/**/*.ts"]
+}

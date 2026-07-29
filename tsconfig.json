@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "resolvePackageJsonExports": false,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "sourceMap": true,
+
+    // rootDir pins the "top" of our source tree. Without it, TypeScript infers
+    // it from the files it happens to compile, which silently changes the shape
+    // of dist/ whenever we import something from outside src/. Pinning it means
+    // src/main.ts always emits to dist/main.js.
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "baseUrl": "./",
+
+    // Incremental builds cache "what did I already compile?" in a tsbuildinfo
+    // file. By default that file lands outside outDir — so deleting dist/ does
+    // NOT delete the cache, and the next build sees a cache saying "everything
+    // is up to date" while dist/ is empty. The result is a successful build
+    // that emits nothing, and a `Cannot find module './app.controller'` crash
+    // at runtime.
+    //
+    // Putting the cache inside dist/ ties its lifetime to the output it
+    // describes: delete one, you delete both, and they can never disagree.
+    "incremental": true,
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+
+    // strict turns on the whole family of type-safety checks at once
+    // (noImplicitAny, strictNullChecks, strictPropertyInitialization, ...).
+    // Every one of them catches a class of bug the compiler can prove exists.
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // skipLibCheck: don't type-check .d.ts files from node_modules. They are
+    // not our code and checking them is slow.
+    "skipLibCheck": true,
+
+    // Prisma's generated client is derived code; it is not ours to fix.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  // Only files under src/ are part of the application program. Root-level
+  // tooling files (prisma.config.ts, eslint.config.mjs) are configured
+  // separately and must not widen rootDir.
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
+}
