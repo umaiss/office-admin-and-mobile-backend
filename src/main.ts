@@ -4,6 +4,7 @@ import {
   VersioningType,
 } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import compression from 'compression';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
@@ -13,7 +14,7 @@ import { setupSwagger } from './common/swagger/setup-swagger';
 import { AppConfigService } from './config/app-config.service';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Hold log lines until our pino logger is attached a few lines below, so
     // nothing from startup is lost or printed in the wrong format.
     bufferLogs: true,
@@ -27,6 +28,15 @@ async function bootstrap(): Promise<void> {
   // read here is guaranteed to exist and to be the right type — no `!`, no
   // undefined checks, no defensive fallbacks.
   const config = app.get(AppConfigService);
+
+  // --- Reverse proxy -------------------------------------------------------
+  // Must be set BEFORE any middleware that reads the client IP, so that
+  // `request.ip` is the real caller rather than the proxy. Without it, behind
+  // nginx every request looks like it came from 127.0.0.1: rate limiting would
+  // treat all users as a single client and lock everyone out together.
+  if (config.trustProxyHops > 0) {
+    app.set('trust proxy', config.trustProxyHops);
+  }
 
   // --- Security headers ----------------------------------------------------
   // helmet sets a dozen HTTP headers that turn off risky browser behaviour

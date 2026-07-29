@@ -1,0 +1,43 @@
+# Everything here is excluded from the Docker build context — the set of files
+# sent to the Docker daemon before the build starts.
+#
+# This matters for two reasons:
+#   1. Speed. node_modules is hundreds of megabytes; shipping it to the daemon
+#      on every build is slow, and the image rebuilds it anyway.
+#   2. SECURITY. Anything copied into an image can be extracted from that image
+#      by anyone who can pull it. `.env` holds your production database password
+#      and JWT secret and must never be baked in — secrets are supplied at RUN
+#      time by docker-compose, never at BUILD time.
+
+node_modules
+dist
+coverage
+.git
+.gitignore
+
+# Secrets — never in an image
+.env
+.env.*
+!.env.example
+
+# Generated Prisma Client: regenerated inside the build from schema.prisma, and
+# the host copy may have been built for a different platform.
+src/generated
+
+# Local tooling and docs, irrelevant to the runtime
+.vscode
+.idea
+.agents
+docs
+*.md
+!README.md
+
+# Test artefacts
+test
+**/*.spec.ts
+**/*.e2e-spec.ts
+
+# OS noise
+.DS_Store
+Thumbs.db
+*.log

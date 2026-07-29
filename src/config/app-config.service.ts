@@ -79,6 +79,11 @@ export class AppConfigService {
     return this.read('BCRYPT_SALT_ROUNDS');
   }
 
+  /** Number of reverse proxies in front of the app; 0 means none. */
+  get trustProxyHops(): number {
+    return this.read('TRUST_PROXY_HOPS');
+  }
+
   // ---- Rate limiting -------------------------------------------------------
   get throttleTtlSeconds(): number {
     return this.read('THROTTLE_TTL_SECONDS');

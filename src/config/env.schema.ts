@@ -77,6 +77,25 @@ export const envSchema = z.object({
   AUTH_THROTTLE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
   AUTH_THROTTLE_LIMIT: z.coerce.number().int().positive().default(5),
 
+  // ---- Proxy ---------------------------------------------------------------
+  // How many reverse proxies sit in front of this app.
+  //
+  // Behind nginx, every request arrives from the proxy, so `request.ip` becomes
+  // the proxy's address — identical for every caller. Rate limiting would then
+  // count all users as one and lock everybody out at the same time, and every
+  // stored `ipAddress` would be useless for auditing.
+  //
+  // Setting this tells Express to read the real client IP from the
+  // X-Forwarded-For header instead. The NUMBER matters: it is how many trailing
+  // entries in that header to trust. Clients can forge X-Forwarded-For, so
+  // trusting more hops than actually exist lets anyone spoof their IP and
+  // bypass rate limiting entirely.
+  //
+  //   0 = no proxy (local development)
+  //   1 = one proxy, e.g. nginx on the same host   <- our EC2 setup
+  //   2 = nginx behind a load balancer
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+
   // ---- HTTP ----------------------------------------------------------------
   // Comma-separated list of browser origins allowed to call this API.
   // Empty means "no browser origins" — mobile apps are unaffected by CORS.

@@ -36,11 +36,15 @@ lerna-debug.log*
 !.vscode/extensions.json
 
 # dotenv environment variable files
+#
+# Ignore EVERY .env variant, then explicitly re-include the *.example templates.
+# An allow-list is safer than a deny-list here: a new `.env.staging` created six
+# months from now is ignored automatically, rather than being committed because
+# nobody remembered to add a line.
 .env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+.env.*
+!.env.example
+!.env.production.example
 
 # temp directory
 .temp
