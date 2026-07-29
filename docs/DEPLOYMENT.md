@@ -10,10 +10,18 @@ A step-by-step runbook. Commands marked **[local]** run on your machine; **[ec2]
 
 ## 0. What you need
 
-- An EC2 instance running **Ubuntu 22.04 or 24.04**
+- An EC2 instance running **Amazon Linux 2023** (these instructions) or **Ubuntu** (see the Ubuntu note in §2)
 - Its **public IP** and your **`.pem` key file**
 - Your GitHub repository URL
 - **At least 2GB RAM**, or a swap file (§2). A 1GB `t2.micro` will run out of memory during the TypeScript build and fail with a confusing "killed" message.
+
+Check which OS you have:
+
+```bash
+cat /etc/os-release
+```
+
+`ID="amzn"` means Amazon Linux — use `dnf` and the `ec2-user` account. `ID=ubuntu` means Ubuntu — use `apt` and the `ubuntu` account.
 
 ---
 
@@ -30,35 +38,85 @@ In the AWS console: **EC2 → Instances → your instance → Security → Secur
 
 ---
 
-## 2. Prepare the server
+## 2. Prepare the server — Amazon Linux 2023
 
 ```bash
-ssh -i your-key.pem ubuntu@YOUR_EC2_IP
+ssh -i your-key.pem ec2-user@YOUR_EC2_IP
 ```
 
-**[ec2]** Update and install Docker:
+**[ec2]** Install Docker and git:
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker ubuntu
+sudo dnf install -y docker git
 ```
 
-Log out and back in for the group change to apply, then confirm:
+Start the Docker service and enable it at boot. Unlike the Ubuntu installer, the
+`dnf` package does **not** start the daemon for you:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+Let `ec2-user` talk to Docker without `sudo`:
+
+```bash
+sudo usermod -aG docker ec2-user
+```
+
+**Log out and back in.** Group membership is read only at login, so the change
+does nothing in your current session:
 
 ```bash
 exit
 ```
 
+Reconnect, then confirm:
+
 ```bash
 docker run --rm hello-world
 ```
 
-**[ec2]** Add swap if the instance has under 2GB RAM:
+### Docker Compose v2
+
+Amazon Linux ships the Docker engine but **not** the Compose plugin, so
+`docker compose` will report "is not a docker command" until you install it.
+
+`uname -m` selects the right binary automatically — Graviton instances
+(`t4g`, `c7g`, …) are `aarch64`, everything else is `x86_64`. Downloading the
+wrong one gives a confusing "cannot execute binary file" error:
 
 ```bash
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+sudo mkdir -p /usr/local/lib/docker/cli-plugins && sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" -o /usr/local/lib/docker/cli-plugins/docker-compose && sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 ```
+
+Verify:
+
+```bash
+docker compose version
+```
+
+> Installed system-wide rather than in `~/.docker/cli-plugins` so it also works
+> under `sudo`, which matters the first time you debug something as root.
+
+### Swap
+
+Check how much memory you actually have:
+
+```bash
+free -h
+```
+
+If **total memory is under 2GB**, add swap — otherwise the TypeScript build is
+killed partway through by the kernel's out-of-memory killer, and the error
+rarely mentions memory:
+
+```bash
+sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+```
+
+> `dd` rather than `fallocate`: a fallocated file can contain holes that
+> `swapon` refuses on some filesystems. `dd` writes real zeroes, which always
+> works — slower by a few seconds, and worth it for not having to debug it.
 
 Make it survive a reboot:
 
@@ -66,7 +124,18 @@ Make it survive a reboot:
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
-> **Why:** the TypeScript compiler and `npm ci` are memory-hungry. Without swap, the Linux OOM killer terminates the build partway through and the error message rarely says "out of memory".
+Confirm it is active:
+
+```bash
+free -h
+```
+
+### If you are on Ubuntu instead
+
+Same steps, different commands: `sudo apt update && sudo apt upgrade -y`, then
+`curl -fsSL https://get.docker.com | sudo sh` (this installer *does* start the
+daemon and *does* include Compose), then
+`sudo usermod -aG docker ubuntu`. The account is `ubuntu`, not `ec2-user`.
 
 ---
 
@@ -249,7 +318,7 @@ gunzip -c ~/obtrack-2026-07-29.sql.gz | docker compose exec -T postgres psql -U 
 
 **Browser CORS errors from the dashboard** — add its exact origin (scheme + host + port, no trailing slash) to `CORS_ORIGINS` and redeploy.
 
-**Port 80 already in use** — something else (often Apache) is running: `sudo systemctl stop apache2 && sudo systemctl disable apache2`.
+**Port 80 already in use** — something else is running: find it with `sudo ss -lptn 'sport = :80'`, then stop it (`sudo systemctl stop httpd && sudo systemctl disable httpd` on Amazon Linux).
 
 ---
 
@@ -261,7 +330,7 @@ Do this before real users. You need a domain with an **A record pointing at the 
 2. Install Certbot and obtain a certificate:
 
 ```bash
-sudo apt install -y certbot && sudo certbot certonly --standalone -d api.yourdomain.com
+sudo dnf install -y certbot && sudo certbot certonly --standalone -d api.yourdomain.com
 ```
 
 (Stop nginx first: `docker compose stop nginx`.)
@@ -277,7 +346,7 @@ sudo apt install -y certbot && sudo certbot certonly --standalone -d api.yourdom
 6. Automate renewal — certificates last 90 days:
 
 ```bash
-echo "0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f /home/ubuntu/obtrack/docker-compose.yml restart nginx'" | sudo crontab -
+echo "0 3 * * * certbot renew --quiet --deploy-hook 'docker compose -f /home/ec2-user/obtrack/docker-compose.yml restart nginx'" | sudo crontab -
 ```
 
 ---
