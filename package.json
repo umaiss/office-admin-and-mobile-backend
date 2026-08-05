@@ -27,6 +27,12 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
+  "_overridesNote": "jest-resolve@30 pulls unrs-resolver, whose optional wasm bindings depend on @emnapi/*. npm writes those as NESTED entries under the binding and then `npm ci` cannot resolve them ('Missing: @emnapi/core from lock file'), so the Docker build fails on Linux even though `npm install` works. Pinning them collapses the duplicates into single top-level entries the lockfile can satisfy. Remove once npm/jest fix the underlying resolution bug.",
+  "overrides": {
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
+    "@emnapi/wasi-threads": "1.2.3"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1103.0",
     "@nestjs/common": "^11.0.1",
