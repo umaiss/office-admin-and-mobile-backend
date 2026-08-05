@@ -101,6 +101,39 @@ export const envSchema = z.object({
   // Empty means "no browser origins" — mobile apps are unaffected by CORS.
   CORS_ORIGINS: z.string().default(''),
 
+  // ---- File storage --------------------------------------------------------
+  // Where receipt images are written by the local-disk storage driver.
+  //
+  // MUST be a path that survives a redeploy. Inside a container the default
+  // lands on the container's own filesystem, which is destroyed and recreated on
+  // every deploy — mount a volume here or the receipts an office boy uploaded
+  // this morning are gone this afternoon. See docker-compose.yml.
+  UPLOADS_DIR: z.string().min(1).default('./uploads'),
+
+  // Hard ceiling on a single receipt upload. Enforced by multer before the file
+  // is buffered, so an oversized upload is rejected at the socket rather than
+  // after being read into memory. 5 MB comfortably fits a phone camera photo.
+  MAX_RECEIPT_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(52_428_800)
+    .default(5_242_880),
+
+  // ---- Reporting -----------------------------------------------------------
+  // Offset, in minutes, from UTC to the calendar day the business reports on.
+  //
+  // "Completed today" has to mean the office's today, not the server's. A
+  // container running UTC would otherwise roll the day over at 5am local time in
+  // Pakistan, splitting a single working day across two report buckets. Set to
+  // 300 for PKT (UTC+5); 0 means report in UTC.
+  REPORT_TZ_OFFSET_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(-720)
+    .max(840)
+    .default(0),
+
   // ---- Observability -------------------------------------------------------
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])

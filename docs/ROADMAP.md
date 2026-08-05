@@ -567,23 +567,50 @@ These aren't a phase; they're the standard applied throughout.
 | 0 | Foundations & cross-cutting concerns | ✅ **Complete** — see `docs/PHASE-0.md` |
 | 1 | Database schema round two + seed | ✅ **Complete** — see `docs/PHASE-1.md` |
 | 2 | Auth hardening & RBAC | ✅ **Complete** — see `docs/PHASE-2.md` |
-| 3 | Users & office boy management | 🟨 Partial — create only, unprotected |
-| 4 | Task lifecycle | ⬜ Not started |
-| 5 | Location tracking & offline sync | ⬜ Not started |
-| 6 | Attendance | ⬜ Not started |
+| 3 | Users & office boy management | ✅ **Complete** — CRUD, list/search, activate/deactivate, admin password reset (all admin-guarded; deactivate & reset revoke refresh tokens) |
+| 4 | Task lifecycle | ✅ **Complete** — create/start/complete/cancel, settlement (amounts + receipt + submit), admin views, per-OB & admin stats |
+| 5 | Location tracking & offline sync | ✅ **Complete** — batch locations, route computation, distance/duration |
+| 6 | Attendance | ⬜ Not started — schema only, no module |
 | 7 | Notifications & WebSockets | ⬜ Not started |
-| 8 | Reports & analytics | ⬜ Not started |
-| 9 | Testing & quality hardening | 🟨 Partial — 23 unit tests passing, no e2e |
-| 10 | Deployment | ⬜ Not started |
+| 8 | Reports & analytics | ✅ **Complete** — admin & per-office-boy statistics, effective-dated reimbursements, Hours Saved with collective totals, petty cash receipts feed, four xlsx exports |
+| 9 | Testing & quality hardening | 🟨 Partial — 216 unit tests passing, no e2e harness |
+| 10 | Deployment | ✅ **Complete** — Dockerfile, docker-compose (Postgres + api + nginx + migrate), `deploy.sh`, `nginx/`, `docs/DEPLOYMENT.md` |
+
+### Delivered in the settlement & reporting pass
+
+The product spec's tail — the part beyond "the errand happened" — is now built:
+
+- **Task flow completed.** `create → start → track → end → settlement → receipt →
+  submit`, one route per step. The settlement is the two amounts
+  (`Decimal(12,2)`, defaulting to 0) plus free-text `vendorDetails` — who the
+  money was spent with — and is written **only** by
+  `PATCH /tasks/:id/settlement`. `/end` deliberately refuses those fields,
+  because two writers with different meanings for an omitted field let a
+  settlement screen that saves on mount silently wipe what was just stored. The
+  receipt is optional; `submittedAt` freezes the record for the admin.
+- **Receipt storage** behind a `StorageService` abstraction (`src/storage/`).
+  Local disk today; swapping to object storage is one `useClass` change. File
+  types are verified from magic bytes, and storage keys are server-generated so a
+  filename can never become a path.
+- **Reimbursement rate as effective-dated history** (`src/reimbursement/`),
+  admin-settable via `POST /admin/reimbursement-rates`. A task is priced at the
+  rate in force when it ended, so a rate change never restates a closed month.
+  Replaces the hardcoded `REIMBURSEMENT_RATE_PER_KM = 25`.
+- **Top 10 cap enforced** — at most ten active employees, checked on create *and*
+  activate inside a serializable transaction. `DELETE /employees/:id` removes an
+  unused employee and refuses (409) one with history.
+- **Hours Saved** gained collective totals, a date window, per-employee detail,
+  and an xlsx export.
 
 ### What already exists and is worth keeping
 
 - Prisma 7 with the `@prisma/adapter-pg` driver adapter, correctly configured
 - Global `PrismaModule`, migrations consistent with the schema (no drift)
 - JWT access + refresh login flow, refresh tokens stored hashed
-- `RolesGuard` and `@Roles()` decorator written (not yet applied anywhere)
+- `RolesGuard` and `@Roles()` decorator applied across users/tasks/employees/admin
 - Global `ValidationPipe` with `whitelist` + `forbidNonWhitelisted` — the correct strict setting
-- 23 passing unit tests
+- Shared helpers rather than copies: `buildTaskWhere`, `buildPaginationMeta`,
+  `parseBoolean`, `ExcelExportService`, `decimalToNumber`
 
 ---
 

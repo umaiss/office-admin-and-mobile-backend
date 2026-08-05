@@ -48,9 +48,26 @@ export function setupSwagger(app: INestApplication): void {
       // routes, so the docs show a padlock and the "Authorize" button works.
       'access-token',
     )
+    // Every @ApiTags value used anywhere in the app is registered here. A tag
+    // that is used but never registered still groups its routes, but renders
+    // with no description — which is how `Tasks`, `Employees` and `Admin` sat
+    // undocumented while the three below were described.
     .addTag('Health', 'Liveness and readiness probes')
     .addTag('Auth', 'Login, token refresh, logout')
     .addTag('Users', 'Account and office boy management')
+    .addTag(
+      'Tasks',
+      'The office boy flow: create → start → track → end → settle → receipt → submit',
+    )
+    .addTag(
+      'Employees',
+      'The Top 10 employee directory and the Hours Saved report',
+    )
+    .addTag(
+      'Admin',
+      'Dashboard views across every office boy: tasks, statistics, ' +
+        'reimbursements, the per-km rate, the petty cash receipts feed, and exports',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

@@ -383,6 +383,74 @@ gunzip -c ~/obtrack-2026-07-29.sql.gz | docker compose exec -T postgres psql -U 
 
 > Backups stored on the same instance disappear with the instance. Copy them to S3 (`aws s3 cp`) once you hold real data.
 
+### Back up the uploaded receipts
+
+The database is not the only stateful thing on this box. Receipt images live on
+the `uploads_data` volume, and `pg_dump` does not touch them — a restore from a
+database backup alone gives you rows describing files that no longer exist.
+
+```bash
+docker run --rm -v obtrack_uploads_data:/data -v ~:/backup alpine \
+  tar czf /backup/obtrack-uploads-$(date +%F).tar.gz -C /data .
+```
+
+Restore:
+
+```bash
+docker run --rm -v obtrack_uploads_data:/data -v ~:/backup alpine \
+  tar xzf /backup/obtrack-uploads-2026-08-05.tar.gz -C /data
+```
+
+> Check the volume's real name with `docker volume ls` — Compose prefixes it with
+> the project directory name.
+
+---
+
+## Receipt storage
+
+Office boys attach a photo of the receipt when they submit a task, and the admin
+reads it to book the expense. Those files are stored on the **`uploads_data`
+named volume**, mounted at `/app/uploads` in the api container.
+
+Two settings have to agree, and there is no error if they do not:
+
+| Where | Value |
+|---|---|
+| `docker-compose.yml` → `api.volumes` | `uploads_data:/app/uploads` |
+| `.env.production` → `UPLOADS_DIR` | `/app/uploads` |
+
+**Why a volume, and what happens without one.** A container's filesystem is
+destroyed and recreated on every deploy. If `UPLOADS_DIR` points anywhere outside
+the volume, every receipt uploaded since the last deploy is silently gone — and
+unlike a database failure there is no crash and no log line, just downloads that
+start returning `404` and an admin who cannot reconcile last week's petty cash.
+
+Related settings:
+
+- `MAX_RECEIPT_BYTES` (default `5242880`, 5 MB) caps a single upload. multer
+  aborts an oversized request mid-transfer rather than buffering it.
+- Accepted types are JPEG, PNG, WebP and PDF, verified by reading the file's
+  leading bytes — not the `Content-Type` the client claims.
+
+**Moving to object storage later.** Nothing above the `StorageService` abstract
+class in `src/storage/` knows about the filesystem. Add an `S3StorageService`
+extending it, change `useClass` in `src/storage/storage.module.ts`, and the
+volume becomes unnecessary. That is the migration to make the moment there is
+more than one api container, because local disk stops working at two.
+
+---
+
+## Reporting timezone
+
+`REPORT_TZ_OFFSET_MINUTES` decides where the calendar day boundary sits for
+"completed today" on both dashboards.
+
+The container runs UTC. Left at `0`, the reporting day rolls over at 5am local
+time in Pakistan, splitting one working day across two report buckets. Set it to
+`300` (UTC+5) so "today" means the office's today.
+
+It only affects day-bucketing; every stored timestamp stays UTC.
+
 ---
 
 ## Troubleshooting

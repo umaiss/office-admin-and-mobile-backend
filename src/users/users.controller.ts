@@ -1,7 +1,18 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import {
   ApiBearerAuth,
   ApiForbiddenResponse,
+  ApiNotFoundResponse,
   ApiOperation,
   ApiTags,
   ApiUnauthorizedResponse,
@@ -10,6 +21,9 @@ import {
 import { Roles } from '../auth/roles.decorator';
 import { Role } from '../generated/prisma/enums';
 import { CreateUserDto } from './dto/create-user.dto';
+import { ListUsersQueryDto } from './dto/list-users-query.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
 import { UsersService } from './users.service';
 
 /**
@@ -47,9 +61,65 @@ export class UsersController {
     return this.usersService.create(createUserDto);
   }
 
+  @Get()
+  @ApiOperation({
+    summary: 'List users (admin only)',
+    description:
+      'Paginated directory. Filter by role and active state, or search across name and email.',
+  })
+  findMany(@Query() query: ListUsersQueryDto) {
+    return this.usersService.findMany(query);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Fetch one user by id (admin only)' })
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.usersService.findById(id);
+  }
+
+  @Patch(':id')
+  @ApiOperation({
+    summary: 'Update a user profile (admin only)',
+    description:
+      'Edits mutable profile fields (name, phone). Email and role are immutable here by design.',
+  })
+  @ApiNotFoundResponse({ description: 'No user with that id.' })
+  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateUserDto) {
+    return this.usersService.update(id, dto);
+  }
+
+  @Post(':id/activate')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Activate a user account (admin only)' })
+  @ApiNotFoundResponse({ description: 'No user with that id.' })
+  activate(@Param('id', ParseUUIDPipe) id: string) {
+    return this.usersService.setActive(id, true);
+  }
+
+  @Post(':id/deactivate')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Deactivate a user account (admin only)',
+    description:
+      'Soft-deletes the account and revokes all of its refresh tokens, so live sessions stop immediately.',
+  })
+  @ApiNotFoundResponse({ description: 'No user with that id.' })
+  deactivate(@Param('id', ParseUUIDPipe) id: string) {
+    return this.usersService.setActive(id, false);
+  }
+
+  @Post(':id/reset-password')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Reset a user password (admin only)',
+    description:
+      'Sets an admin-supplied password and revokes all existing sessions on the account. The hash is never returned.',
+  })
+  @ApiNotFoundResponse({ description: 'No user with that id.' })
+  resetPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResetPasswordDto,
+  ) {
+    return this.usersService.resetPassword(id, dto.newPassword);
   }
 }

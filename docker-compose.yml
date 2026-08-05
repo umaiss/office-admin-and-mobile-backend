@@ -111,6 +111,15 @@ services:
     # outside world never talks to Node directly.
     expose:
       - '3000'
+    volumes:
+      # Receipt images, on a NAMED VOLUME for exactly the same reason the
+      # database is: a container's filesystem is destroyed and recreated on
+      # every deploy. Without this line, every receipt an office boy uploaded
+      # since the last deploy is silently gone — and unlike the database, there
+      # is no error, just a download that starts 404ing.
+      #
+      # The path must match UPLOADS_DIR in .env.production.
+      - uploads_data:/app/uploads
     logging:
       # Without a cap, container logs grow until the disk fills — a genuinely
       # common way for small instances to fall over weeks after a deploy.
@@ -138,6 +147,7 @@ services:
 
 volumes:
   postgres_data:
+  uploads_data:
 
 networks:
   obtrack:

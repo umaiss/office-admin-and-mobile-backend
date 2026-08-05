@@ -69,6 +69,11 @@ async function bootstrap(): Promise<void> {
     origin: corsOrigins.length > 0 ? corsOrigins : false,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+    // A cross-origin response hides every header except a short safelist, so
+    // without this the dashboard could not read the filename off an export
+    // download, nor see the truncation warning the server takes care to set.
+    // `allowedHeaders` is the wrong knob for that — it governs the REQUEST.
+    exposedHeaders: ['Content-Disposition', 'X-Export-Truncated'],
     credentials: true,
     maxAge: 86400,
   });
