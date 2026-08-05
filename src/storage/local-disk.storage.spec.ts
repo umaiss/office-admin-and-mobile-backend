@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -29,6 +36,45 @@ describe('LocalDiskStorageService', () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  describe('onModuleInit', () => {
+    it('creates the root directory when it does not exist yet', async () => {
+      const fresh = path.join(root, 'nested', 'deeper');
+      const service = new LocalDiskStorageService(config(fresh));
+
+      await expect(service.onModuleInit()).resolves.toBeUndefined();
+    });
+
+    it('refuses to start when the root exists but is not writable', async () => {
+      // The Docker case this guards: a named volume mounted at a path the image
+      // never created is owned by root, while the container runs as `node`.
+      // `mkdir(recursive)` succeeds on an existing directory, so only an
+      // explicit write check catches it — and catching it at boot turns a 500
+      // on an office boy's first upload into a deploy that visibly fails.
+      const readOnly = path.join(root, 'locked');
+      await mkdir(readOnly);
+      await chmod(readOnly, 0o500);
+
+      const service = new LocalDiskStorageService(config(readOnly));
+
+      let threw = false;
+      try {
+        await service.onModuleInit();
+      } catch (error) {
+        threw = true;
+        expect((error as Error).message).toMatch(/not writable/);
+      } finally {
+        await chmod(readOnly, 0o700);
+      }
+
+      // Windows ignores POSIX permission bits, so the directory stays writable
+      // there and the check correctly passes. Assert the behaviour only where
+      // the operating system can actually express it.
+      if (process.platform !== 'win32') {
+        expect(threw).toBe(true);
+      }
+    });
   });
 
   describe('save', () => {

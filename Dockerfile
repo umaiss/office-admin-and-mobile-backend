@@ -92,6 +92,20 @@ ENV NODE_ENV=production
 
 WORKDIR /app
 
+# Create the receipts directory IN THE IMAGE, owned by `node`, while still root.
+#
+# This looks redundant — docker-compose mounts the `uploads_data` volume over
+# this exact path — but it is what makes the mount usable. When Docker first
+# mounts an empty named volume it seeds the volume from whatever is at that path
+# in the image, ownership included. If the path does not exist, Docker creates it
+# owned by root:root, and the container (running as `node` two lines below)
+# cannot write a single receipt.
+#
+# The failure mode without this is nasty: the build succeeds, the deploy
+# succeeds, the health check passes, and then the first office boy to attach a
+# receipt gets a 500. Creating it here, owned correctly, is the whole fix.
+RUN mkdir -p /app/uploads && chown -R node:node /app/uploads
+
 # Run as a non-root user.
 #
 # If someone finds a remote-code-execution bug in the app, this is what stands

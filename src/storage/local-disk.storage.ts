@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { mkdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
+import { access, mkdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -60,9 +60,30 @@ export class LocalDiskStorageService
    * Creates the root eagerly at boot rather than lazily on first upload, so a
    * misconfigured or unwritable volume fails the deployment instead of failing
    * the first office boy who tries to attach a receipt.
+   *
+   * The WRITE check is the part that earns its place. `mkdir` with
+   * `recursive: true` succeeds silently on a directory that already exists, so
+   * on its own it proves only that the path is there — not that this process can
+   * put anything in it. A Docker named volume mounted at a path the image never
+   * created is owned by root, and a container running as `node` passes the mkdir
+   * and then fails every upload. Checking `W_OK` turns that into a container
+   * that refuses to start, which is a deploy failure someone notices rather than
+   * a 500 an office boy discovers.
    */
   async onModuleInit(): Promise<void> {
     await mkdir(this.root, { recursive: true });
+
+    try {
+      await access(this.root, constants.W_OK);
+    } catch {
+      throw new Error(
+        `Receipt storage at ${this.root} is not writable by this process. ` +
+          'If running in Docker, the uploads volume is likely owned by root ' +
+          'while the container runs as `node` — see the mkdir/chown in the ' +
+          'Dockerfile runtime stage.',
+      );
+    }
+
     this.logger.log(`Receipt storage ready at ${this.root}`);
   }
 
