@@ -93,10 +93,11 @@ model User {
   /// Powers the dashboard's "who is currently active" view.
   lastLoginAt DateTime?
 
-  tasks         Task[]
-  attendances   Attendance[]
-  notifications Notification[]
-  refreshTokens RefreshToken[]
+  tasks              Task[]
+  attendances        Attendance[]
+  notifications      Notification[]
+  refreshTokens      RefreshToken[]
+  reimbursementRates ReimbursementRate[] @relation("RateAuthor")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -125,7 +126,7 @@ model Task {
   /// online by definition and need no key.
   clientTaskId String? @unique
 
-  title       String
+  title       String?
   description String
   destination String?
 
@@ -141,15 +142,32 @@ model Task {
 
   cancellationReason String?
 
-  // ---- Start and end positions ----
+  // ---- Start, end, and cancel positions ----
   // Denormalised onto the task even though they also exist in TaskLocation.
   // Every task list screen shows "from → to"; without these, rendering one
   // page of 20 tasks would mean 40 extra lookups into a table with millions
-  // of rows. Storing the two endpoints is the cheaper trade.
-  startLatitude  Float?
-  startLongitude Float?
-  endLatitude    Float?
-  endLongitude   Float?
+  // of rows. Storing the endpoints is the cheaper trade.
+  //
+  // The cancel fix is optional even when a task is cancelled: an office boy may
+  // cancel with no signal (no coordinates to record), so unlike start/end these
+  // are not guaranteed to be set on a task in that terminal state.
+  startLatitude   Float?
+  startLongitude  Float?
+  endLatitude     Float?
+  endLongitude    Float?
+  cancelLatitude  Float?
+  cancelLongitude Float?
+
+  // ---- Top 10 Employee link (optional) ----
+  // Most tasks are ordinary errands with no employee attached. When the office
+  // boy ticks "this task is for a Top 10 employee" and picks one, the task
+  // points here. Nullable by design: the checkbox is usually off.
+  //
+  // Restrict (not Cascade/SetNull): an employee with historical tasks is
+  // deactivated, never deleted, exactly like an office boy — so we never orphan
+  // or silently erase the link.
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id], onDelete: Restrict)
 
   // ---- Derived totals ----
   // Computed when the task ends (Phase 5) and cached here so that reports do
@@ -157,8 +175,37 @@ model Task {
   distanceMeters  Float?
   durationSeconds Int?
 
+  // ---- Settlement (petty cash) ----
+  // What the office boy was given by the admin before the errand, and what they
+  // handed back after it. The difference is what the errand actually cost, which
+  // is the number the admin books against petty cash expenses.
+  //
+  // Decimal, not Float: these are money. A Float sums with rounding error, and
+  // an expense ledger that is off by 0.0000001 rupees is a ledger nobody trusts.
+  // Both default to 0 rather than being nullable, because the spec says an
+  // omitted amount MEANS zero — encoding that as NULL would push the decision
+  // into every reader.
+  amountReceived Decimal @default(0) @db.Decimal(12, 2)
+  amountReturned Decimal @default(0) @db.Decimal(12, 2)
+
+  /// Who the money was spent with — a shop name, an invoice number, whatever the
+  /// office boy writes down. Free text on the task rather than a `Vendor` table
+  /// because these are ad-hoc: an errand goes wherever it goes, and forcing a
+  /// pre-registered vendor would block an office boy standing at a counter.
+  ///
+  /// Nullable, unlike the amounts: an omitted amount MEANS zero, whereas an
+  /// omitted vendor means nothing was recorded, and NULL is how you say that.
+  vendorDetails String?
+
+  /// Set by `POST /tasks/:id/submit`, the final step of the office boy's flow.
+  /// Until it is set the office boy may still correct the amounts or replace the
+  /// receipt; afterwards the record is frozen and appears on the admin's petty
+  /// cash feed. NULL therefore means "ended but not yet handed in".
+  submittedAt DateTime?
+
   locations     TaskLocation[]
   route         Route?
+  receipt       TaskReceipt?
   notifications Notification[]
 
   createdAt DateTime @default(now())
@@ -171,6 +218,92 @@ model Task {
   @@index([officeBoyId, createdAt])
   /// "Show me all active tasks across everyone" — the admin dashboard KPI.
   @@index([status, createdAt])
+  /// "Sum the completed-task time per employee" — the Top 10 hours-saved report.
+  /// Employee + status together so the groupBy scans only that employee's
+  /// COMPLETED rows.
+  @@index([employeeId, status])
+  /// "Which completed tasks ended inside this rate period?" — the reimbursement
+  /// report groups by exactly this pair, once per effective-dated rate period.
+  @@index([status, endedAt])
+  /// "What is waiting to be booked into petty cash?" — the admin receipts feed
+  /// filters on submitted vs not.
+  @@index([submittedAt])
+}
+
+// ============================================================================
+//  TaskReceipt
+// ============================================================================
+
+/// The photo (or PDF) of the receipt for a task's expenses.
+///
+/// A separate table rather than five more nullable columns on Task, for the same
+/// reason `Route` is separate: it is written once, read rarely, and only by the
+/// screens that care. Task lists — the hot path — never pay for it.
+///
+/// The BYTES are not here. Only the metadata and a `storageKey` pointing at
+/// whatever `StorageService` is configured (local disk today, object storage
+/// tomorrow). Storing binaries in Postgres would bloat every backup and dump
+/// with data that does not need transactional guarantees.
+model TaskReceipt {
+  id String @id @default(uuid())
+
+  /// One receipt per task — enforced by the DATABASE, so a double-tap on
+  /// "upload" cannot leave two rows racing to describe the same file.
+  taskId String @unique
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  /// Opaque, server-generated locator, e.g. `receipts/2026/08/<uuid>.jpg`.
+  /// NEVER derived from the client's filename: a name like `../../etc/passwd`
+  /// would otherwise become a path.
+  storageKey String
+
+  /// The client's filename, kept only so a download reads as the office boy
+  /// named it. Display data — never used to build a path.
+  originalName String
+  /// The type verified by sniffing the file's magic bytes, not the type the
+  /// client claimed.
+  mimeType     String
+  sizeBytes    Int
+
+  uploadedAt DateTime @default(now())
+}
+
+// ============================================================================
+//  ReimbursementRate
+// ============================================================================
+
+/// The per-kilometre rate used to reimburse office boys, as a history.
+///
+/// The rate is not a single mutable setting, because changing a setting would
+/// silently rewrite what every past month was worth. Instead each change appends
+/// a row: a rate applies to every COMPLETED task whose `endedAt` falls in
+/// `[effectiveFrom, <the next row's effectiveFrom>)`. Last month's report keeps
+/// showing last month's numbers no matter what today's rate is.
+///
+/// A genesis row at the Unix epoch is inserted by the migration that creates
+/// this table, so there is no instant in history that falls outside every
+/// period and every task can always be priced.
+model ReimbursementRate {
+  id String @id @default(uuid())
+
+  ratePerKm Decimal @db.Decimal(10, 2)
+
+  /// Start of this rate's half-open period. Unique so two rates can never claim
+  /// the same instant and leave the lookup ambiguous.
+  effectiveFrom DateTime @unique
+
+  /// Free-text justification ("FY27 fuel adjustment"), shown in the audit list.
+  note String?
+
+  /// Who set it. SetNull rather than Restrict: the rate outlives the admin who
+  /// entered it, and deactivating people must never be blocked by an audit trail.
+  createdById String?
+  createdBy   User?   @relation("RateAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  /// The report reads every row in `effectiveFrom` order to fold the periods.
+  @@index([effectiveFrom])
 }
 
 // ============================================================================
@@ -264,6 +397,41 @@ model Route {
   rawPointCount  Int
 
   computedAt DateTime @default(now())
+}
+
+// ============================================================================
+//  Employee  (a "Top 10 Employee" — the person a task is run FOR)
+// ============================================================================
+
+/// The people office boys run errands for — NOT a login account.
+///
+/// Deliberately separate from `User`: a User authenticates (admin or office
+/// boy), an Employee never logs in. They are the names in the office boy's
+/// "Top 10 Employee" dropdown at task creation, and the rows on the admin's
+/// "Hours Saved" tab (total office-boy time spent on their completed tasks).
+///
+/// Deactivation is the normal way to retire one: an employee with historical
+/// tasks cannot be removed without breaking the tasks that reference them, and
+/// `onDelete: Restrict` on `Task.employeeId` makes the database enforce that.
+/// A hard delete is only permitted for an employee that was never used — the
+/// service checks first, and the FK catches the race if a task lands in between.
+/// The office-boy dropdown only ever lists active employees, and the number of
+/// active employees is capped at ten ("Top 10") in the service layer.
+model Employee {
+  id         String  @id @default(uuid())
+  name       String
+  /// Free-text department label ("Maintenance Dept" in the app). Optional.
+  department String?
+  isActive   Boolean @default(true)
+
+  tasks Task[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// "List the active employees" — the office boy's dropdown and the admin
+  /// directory both filter on this.
+  @@index([isActive])
 }
 
 // ============================================================================

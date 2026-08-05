@@ -46,6 +46,12 @@ lerna-debug.log*
 !.env.example
 !.env.production.example
 
+# Uploaded receipts (UPLOADS_DIR). User data, not source — and in production it
+# lives on a mounted volume, never in the repo. Ignored by directory name so a
+# developer running the app locally cannot accidentally commit a photo of
+# somebody's receipt.
+/uploads
+
 # temp directory
 .temp
 .tmp

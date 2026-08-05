@@ -149,14 +149,94 @@ async function seedSampleOfficeBoys(): Promise<void> {
   }
 }
 
+/**
+ * Sample "Top 10" employees, for local development only.
+ *
+ * These are the names an office boy picks from when a task is for a tracked
+ * employee — not logins. Seeded so the task-creation dropdown and the Hours
+ * Saved tab have something to show against a fresh database. Guarded by a
+ * name-existence check so re-running the seed adds no duplicates.
+ */
+async function seedSampleEmployees(): Promise<void> {
+  if (isProduction) {
+    console.log('  employees  skipped (NODE_ENV=production)');
+    return;
+  }
+
+  const samples = [
+    { name: 'Ahmed Raza', department: 'Maintenance Dept' },
+    { name: 'Sara Khan', department: 'Finance Dept' },
+    { name: 'Hamza Sheikh', department: 'Operations Dept' },
+    { name: 'Ayesha Malik', department: 'HR Dept' },
+  ];
+
+  for (const sample of samples) {
+    const existing = await prisma.employee.findFirst({
+      where: { name: sample.name },
+      select: { id: true },
+    });
+
+    if (existing) {
+      console.log(`  employee   already exists: ${sample.name} (unchanged)`);
+      continue;
+    }
+
+    await prisma.employee.create({
+      data: { ...sample, isActive: true },
+    });
+    console.log(`  employee   created: ${sample.name}`);
+  }
+}
+
+/**
+ * The genesis reimbursement rate.
+ *
+ * Rates are effective-dated: one applies to every completed task whose `endedAt`
+ * falls in `[effectiveFrom, <the next rate's effectiveFrom>)`. A database with
+ * no rate starting at the beginning of time has instants that belong to no
+ * period, and tasks that land there cannot be priced at all.
+ *
+ * The migration inserts this row too, so an upgraded database already has it.
+ * Seeding it as well covers `prisma db push` and fresh test databases, where no
+ * migration ever ran. Runs unconditionally — including in production — because
+ * an unpriceable task is a bug in every environment.
+ */
+async function seedGenesisReimbursementRate(): Promise<void> {
+  const existing = await prisma.reimbursementRate.findFirst({
+    select: { id: true },
+  });
+
+  if (existing) {
+    console.log('  rate       already exists (unchanged)');
+    return;
+  }
+
+  await prisma.reimbursementRate.create({
+    data: {
+      ratePerKm: GENESIS_RATE_PER_KM,
+      effectiveFrom: new Date(0),
+      note: 'Initial rate, carried over from the previous hardcoded value.',
+    },
+  });
+  console.log(`  rate       created: ${GENESIS_RATE_PER_KM}/km from epoch`);
+}
+
+/** Matches the value the migration inserts. Change both or neither. */
+const GENESIS_RATE_PER_KM = 25;
+
 async function main(): Promise<void> {
   console.log(`\nSeeding database [${process.env.NODE_ENV ?? 'development'}]\n`);
 
   await seedAdmin();
+  await seedGenesisReimbursementRate();
   await seedSampleOfficeBoys();
+  await seedSampleEmployees();
 
   const total = await prisma.user.count();
-  console.log(`\nDone. ${total} user(s) in the database.\n`);
+  const employees = await prisma.employee.count();
+  console.log(
+    `\nDone. ${total} user(s) and ${employees} employee(s) in the database.\n`,
+  );
 }
 
 main()

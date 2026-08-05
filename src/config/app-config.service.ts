@@ -115,6 +115,27 @@ export class AppConfigService {
       .filter(Boolean);
   }
 
+  // ---- File storage --------------------------------------------------------
+  /** Root directory the local-disk storage driver writes receipts under. */
+  get uploadsDir(): string {
+    return this.read('UPLOADS_DIR');
+  }
+
+  /** Largest receipt upload accepted, in bytes. */
+  get maxReceiptBytes(): number {
+    return this.read('MAX_RECEIPT_BYTES');
+  }
+
+  // ---- Reporting -----------------------------------------------------------
+  /**
+   * Minutes to add to UTC to reach the calendar day reports are bucketed by.
+   * Consumed by `todayUtcRange`; see the note in `env.schema.ts` for why the
+   * server's own timezone is not used.
+   */
+  get reportTzOffsetMinutes(): number {
+    return this.read('REPORT_TZ_OFFSET_MINUTES');
+  }
+
   // ---- Observability -------------------------------------------------------
   get logLevel(): Env['LOG_LEVEL'] {
     return this.read('LOG_LEVEL');
