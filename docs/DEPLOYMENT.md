@@ -409,8 +409,100 @@ docker run --rm -v obtrack_uploads_data:/data -v ~:/backup alpine \
 ## Receipt storage
 
 Office boys attach a photo of the receipt when they submit a task, and the admin
-reads it to book the expense. Those files are stored on the **`uploads_data`
-named volume**, mounted at `/app/uploads` in the api container.
+reads it to book the expense. Two backends are supported, selected by
+`STORAGE_DRIVER`.
+
+Nothing above the `StorageService` abstract class in `src/storage/` knows which
+one is running — the tasks service, the controller and the `TaskReceipt` row are
+written against four methods. Switching is an environment change, not a code
+change, and both drivers generate identical storage keys so the values already in
+the database keep resolving.
+
+### Option A — S3 (recommended in production)
+
+Receipts survive container replacement with no volume to manage or back up, and
+it is the only option that still works if this ever runs on more than one
+instance.
+
+**1. Create a private bucket.** Region should match the EC2 instance, so
+transfer stays free and latency low.
+
+```bash
+aws s3api create-bucket --bucket obtrack-receipts --region eu-north-1 --create-bucket-configuration LocationConstraint=eu-north-1
+```
+
+**2. Block all public access.** The app streams receipts through its own
+authorised endpoint, so nothing needs public read. A receipt is somebody's
+expense record.
+
+```bash
+aws s3api put-public-access-block --bucket obtrack-receipts --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+```
+
+**3. Turn on default encryption and versioning.** Versioning is what lets you
+recover a receipt deleted by mistake — the app's replace-receipt path deletes
+the old object.
+
+```bash
+aws s3api put-bucket-encryption --bucket obtrack-receipts --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+```
+
+```bash
+aws s3api put-bucket-versioning --bucket obtrack-receipts --versioning-configuration Status=Enabled
+```
+
+**4. Grant the EC2 instance access via an IAM role — not access keys.**
+
+An instance role hands the SDK short-lived credentials that rotate on their own.
+Long-lived `AWS_ACCESS_KEY_ID`/`SECRET` in `.env.production` is the thing that
+leaks, and the app deliberately does not read them from config.
+
+Save this as `obtrack-receipts-policy.json` — it is the complete set of
+permissions the app uses, and nothing more:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::obtrack-receipts/*"
+    }
+  ]
+}
+```
+
+Note there is no `s3:ListBucket`. The app never lists the bucket, and its
+boot-time write check is a put-then-delete probe precisely so that a minimal
+policy like this one passes.
+
+Create the policy, attach it to a role the EC2 service can assume, and attach
+that role to the instance — via the console (**EC2 → Instance → Actions →
+Security → Modify IAM role**) or the CLI. No restart of the instance is needed;
+the SDK picks the role up from the instance metadata service.
+
+**5. Point the app at it** in `.env.production`:
+
+```bash
+STORAGE_DRIVER=s3
+S3_BUCKET=obtrack-receipts
+S3_REGION=eu-north-1
+```
+
+Then deploy. On boot the app writes and deletes a probe object; if the role is
+wrong the container **refuses to start** with a message naming the bucket and
+the missing permissions, rather than failing on the first office boy's upload.
+
+Once S3 is live the `uploads_data` volume and its tar backup are no longer
+needed — though leaving the volume in place costs nothing and keeps any
+already-uploaded local receipts recoverable. See "Migrating existing receipts"
+below.
+
+### Option B — local disk
+
+Files are stored on the **`uploads_data` named volume**, mounted at
+`/app/uploads` in the api container.
 
 Two settings have to agree, and there is no error if they do not:
 
@@ -425,18 +517,40 @@ the volume, every receipt uploaded since the last deploy is silently gone — an
 unlike a database failure there is no crash and no log line, just downloads that
 start returning `404` and an admin who cannot reconcile last week's petty cash.
 
-Related settings:
+One more trap: the container runs as the non-root `node` user. The Dockerfile
+creates `/app/uploads` owned by `node` **before** dropping privileges, because
+Docker seeds a fresh named volume from whatever is at that path in the image —
+ownership included. Without that line the volume is created owned by root and
+the app cannot write a single receipt. If you are adopting this on an instance
+whose volume predates the fix, Docker will not re-seed it; correct it once:
+
+```bash
+docker compose --env-file .env.production run --rm --user root api chown -R node:node /app/uploads
+```
+
+### Settings shared by both drivers
 
 - `MAX_RECEIPT_BYTES` (default `5242880`, 5 MB) caps a single upload. multer
   aborts an oversized request mid-transfer rather than buffering it.
 - Accepted types are JPEG, PNG, WebP and PDF, verified by reading the file's
   leading bytes — not the `Content-Type` the client claims.
 
-**Moving to object storage later.** Nothing above the `StorageService` abstract
-class in `src/storage/` knows about the filesystem. Add an `S3StorageService`
-extending it, change `useClass` in `src/storage/storage.module.ts`, and the
-volume becomes unnecessary. That is the migration to make the moment there is
-more than one api container, because local disk stops working at two.
+### Migrating existing receipts from local disk to S3
+
+Storage keys are identical across drivers, so the `TaskReceipt.storageKey`
+values in the database need no rewriting — copy the objects across and flip the
+setting.
+
+```bash
+docker compose --env-file .env.production cp api:/app/uploads ./uploads-export
+```
+
+```bash
+aws s3 sync ./uploads-export s3://obtrack-receipts/ --exclude ".obtrack-write-probe"
+```
+
+Then set `STORAGE_DRIVER=s3` and redeploy. Verify a download before deleting the
+local copy.
 
 ---
 
