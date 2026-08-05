@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
 import { access, mkdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -12,11 +11,7 @@ import {
 } from '@nestjs/common';
 
 import { AppConfigService } from '../config/app-config.service';
-import {
-  ALLOWED_RECEIPT_MIME_TYPES,
-  MIME_TYPE_EXTENSIONS,
-  type AllowedReceiptMimeType,
-} from './file-type';
+import { buildStorageKey } from './storage-key';
 import {
   StorageService,
   type SaveFileOptions,
@@ -88,15 +83,9 @@ export class LocalDiskStorageService
   }
 
   async save(buffer: Buffer, options: SaveFileOptions): Promise<StoredFile> {
-    // Date-sharded so one directory does not accumulate every receipt ever
-    // uploaded; filesystems slow down badly with hundreds of thousands of
-    // entries in a single directory.
-    const now = new Date();
-    const year = String(now.getUTCFullYear());
-    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-
-    const extension = extensionFor(options.mimeType);
-    const key = `${options.namespace}/${year}/${month}/${randomUUID()}.${extension}`;
+    // Shared with the S3 driver, so the same upload lands under the same key
+    // whichever backend is configured — see the note in storage-key.ts.
+    const key = buildStorageKey(options.namespace, options.mimeType);
 
     const absolute = this.resolveKey(key);
     await mkdir(path.dirname(absolute), { recursive: true });
@@ -164,15 +153,4 @@ export class LocalDiskStorageService
       return false;
     }
   }
-}
-
-/**
- * Extension for a verified mime type. Falls back to `bin` for a type outside
- * the allowlist, which the upload path rejects before reaching here — the
- * fallback exists so this function is total, not because it should ever run.
- */
-function extensionFor(mimeType: string): string {
-  return ALLOWED_RECEIPT_MIME_TYPES.includes(mimeType as AllowedReceiptMimeType)
-    ? MIME_TYPE_EXTENSIONS[mimeType as AllowedReceiptMimeType]
-    : 'bin';
 }
