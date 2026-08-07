@@ -102,6 +102,35 @@ export const envSchema = z.object({
   CORS_ORIGINS: z.string().default(''),
 
   // ---- File storage --------------------------------------------------------
+  // Which storage backend receipts live in.
+  //
+  //   local  a directory on the machine. Correct for one host; stops working
+  //          the moment there are two, because a receipt uploaded through
+  //          container A is invisible to container B.
+  //   s3     an S3 bucket (or any S3-compatible service). Survives container
+  //          replacement with no volume, and works with any number of hosts.
+  STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
+
+  // Bucket name. REQUIRED when STORAGE_DRIVER=s3 — see the refinement below.
+  S3_BUCKET: z.string().optional(),
+
+  S3_REGION: z.string().default('eu-north-1'),
+
+  // Only for S3-compatible services (MinIO, Cloudflare R2, DigitalOcean
+  // Spaces). Leave unset for real AWS, where the region determines the endpoint.
+  S3_ENDPOINT: z.string().url().optional(),
+
+  // Path-style addressing (`endpoint/bucket/key`). AWS deprecated it; most
+  // self-hosted S3-alikes require it.
+  S3_FORCE_PATH_STYLE: booleanFromString.default(false),
+
+  // NOTE: there are deliberately no AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+  // entries here. The SDK's default credential chain reads those itself if they
+  // are set, but the intended setup on EC2 is an instance IAM role: credentials
+  // that rotate on their own and never exist as a string in a file. Declaring
+  // them here would invite someone to paste long-lived keys into
+  // .env.production, which is the thing that leaks.
+
   // Where receipt images are written by the local-disk storage driver.
   //
   // MUST be a path that survives a redeploy. Inside a container the default
@@ -140,6 +169,26 @@ export const envSchema = z.object({
     .default('info'),
 
   SWAGGER_ENABLED: booleanFromString.default(false),
+});
+
+/**
+ * The schema plus the rules that span more than one variable.
+ *
+ * `S3_BUCKET` cannot simply be `required`, because it is meaningless under the
+ * local driver — but under `STORAGE_DRIVER=s3` its absence is fatal, and the
+ * failure without this check would be an S3 client politely trying to write to
+ * a bucket named `undefined`. Cross-field rules like this are exactly what a
+ * refinement is for, and putting it here keeps the fail-fast promise: the
+ * container refuses to start, naming the variable.
+ */
+export const validatedEnvSchema = envSchema.superRefine((env, ctx) => {
+  if (env.STORAGE_DRIVER === 's3' && !env.S3_BUCKET) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['S3_BUCKET'],
+      message: 'is required when STORAGE_DRIVER=s3',
+    });
+  }
 });
 
 /** The fully parsed, defaulted, type-safe shape of our environment. */

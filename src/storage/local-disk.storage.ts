@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { mkdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
+import { access, mkdir, stat, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -12,11 +11,7 @@ import {
 } from '@nestjs/common';
 
 import { AppConfigService } from '../config/app-config.service';
-import {
-  ALLOWED_RECEIPT_MIME_TYPES,
-  MIME_TYPE_EXTENSIONS,
-  type AllowedReceiptMimeType,
-} from './file-type';
+import { buildStorageKey } from './storage-key';
 import {
   StorageService,
   type SaveFileOptions,
@@ -60,22 +55,37 @@ export class LocalDiskStorageService
    * Creates the root eagerly at boot rather than lazily on first upload, so a
    * misconfigured or unwritable volume fails the deployment instead of failing
    * the first office boy who tries to attach a receipt.
+   *
+   * The WRITE check is the part that earns its place. `mkdir` with
+   * `recursive: true` succeeds silently on a directory that already exists, so
+   * on its own it proves only that the path is there — not that this process can
+   * put anything in it. A Docker named volume mounted at a path the image never
+   * created is owned by root, and a container running as `node` passes the mkdir
+   * and then fails every upload. Checking `W_OK` turns that into a container
+   * that refuses to start, which is a deploy failure someone notices rather than
+   * a 500 an office boy discovers.
    */
   async onModuleInit(): Promise<void> {
     await mkdir(this.root, { recursive: true });
+
+    try {
+      await access(this.root, constants.W_OK);
+    } catch {
+      throw new Error(
+        `Receipt storage at ${this.root} is not writable by this process. ` +
+          'If running in Docker, the uploads volume is likely owned by root ' +
+          'while the container runs as `node` — see the mkdir/chown in the ' +
+          'Dockerfile runtime stage.',
+      );
+    }
+
     this.logger.log(`Receipt storage ready at ${this.root}`);
   }
 
   async save(buffer: Buffer, options: SaveFileOptions): Promise<StoredFile> {
-    // Date-sharded so one directory does not accumulate every receipt ever
-    // uploaded; filesystems slow down badly with hundreds of thousands of
-    // entries in a single directory.
-    const now = new Date();
-    const year = String(now.getUTCFullYear());
-    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-
-    const extension = extensionFor(options.mimeType);
-    const key = `${options.namespace}/${year}/${month}/${randomUUID()}.${extension}`;
+    // Shared with the S3 driver, so the same upload lands under the same key
+    // whichever backend is configured — see the note in storage-key.ts.
+    const key = buildStorageKey(options.namespace, options.mimeType);
 
     const absolute = this.resolveKey(key);
     await mkdir(path.dirname(absolute), { recursive: true });
@@ -143,15 +153,4 @@ export class LocalDiskStorageService
       return false;
     }
   }
-}
-
-/**
- * Extension for a verified mime type. Falls back to `bin` for a type outside
- * the allowlist, which the upload path rejects before reaching here — the
- * fallback exists so this function is total, not because it should ever run.
- */
-function extensionFor(mimeType: string): string {
-  return ALLOWED_RECEIPT_MIME_TYPES.includes(mimeType as AllowedReceiptMimeType)
-    ? MIME_TYPE_EXTENSIONS[mimeType as AllowedReceiptMimeType]
-    : 'bin';
 }

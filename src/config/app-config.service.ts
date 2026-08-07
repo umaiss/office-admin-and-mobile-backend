@@ -116,6 +116,37 @@ export class AppConfigService {
   }
 
   // ---- File storage --------------------------------------------------------
+  /** Which storage backend receipts live in: `local` or `s3`. */
+  get storageDriver(): Env['STORAGE_DRIVER'] {
+    return this.read('STORAGE_DRIVER');
+  }
+
+  /**
+   * Bucket receipts are stored in.
+   *
+   * Non-null asserted because `validatedEnvSchema` refuses to boot with
+   * `STORAGE_DRIVER=s3` and no bucket, and this getter is only ever read by the
+   * S3 driver — which only exists under that setting. The alternative, a
+   * `string | undefined` that every call site re-checks, would be re-proving a
+   * guarantee the config layer already made.
+   */
+  get s3Bucket(): string {
+    return this.read('S3_BUCKET')!;
+  }
+
+  get s3Region(): string {
+    return this.read('S3_REGION');
+  }
+
+  /** Set only for S3-compatible services; undefined means real AWS. */
+  get s3Endpoint(): string | undefined {
+    return this.read('S3_ENDPOINT');
+  }
+
+  get s3ForcePathStyle(): boolean {
+    return this.read('S3_FORCE_PATH_STYLE');
+  }
+
   /** Root directory the local-disk storage driver writes receipts under. */
   get uploadsDir(): string {
     return this.read('UPLOADS_DIR');

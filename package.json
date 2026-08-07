@@ -27,7 +27,9 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
+  "_lockfileNote": "package-lock.json MUST be regenerated on Linux, not Windows. jest-resolve@30 pulls unrs-resolver, whose optional wasm bindings depend on @emnapi/*; npm on Windows prunes those platform-inapplicable entries from the lock while leaving the requirement behind, so `npm ci` inside the Linux build image fails with 'Missing: @emnapi/core from lock file'. A local `npm ci` on Windows passes, because Windows npm never evaluates the binding — local verification cannot catch this. Regenerate with: docker run --rm -v \"$PWD\":/app -w /app node:22-bookworm-slim npm install --package-lock-only",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1103.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",

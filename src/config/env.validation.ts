@@ -1,4 +1,4 @@
-import { Env, envSchema } from './env.schema';
+import { Env, validatedEnvSchema } from './env.schema';
 
 /**
  * Validates `process.env` at application startup.
@@ -20,7 +20,7 @@ import { Env, envSchema } from './env.schema';
  * Fail-fast converts a 3am incident into a red build. Always prefer it.
  */
 export function validateEnv(raw: Record<string, unknown>): Env {
-  const result = envSchema.safeParse(raw);
+  const result = validatedEnvSchema.safeParse(raw);
 
   if (!result.success) {
     const problems = result.error.issues
