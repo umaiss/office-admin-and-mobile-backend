@@ -17,6 +17,7 @@ import { buildLoggerConfig } from './config/logger.config';
 import { EmployeesModule } from './employees/employees.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { PettyCashModule } from './petty-cash/petty-cash.module';
 import { RefreshTokenModule } from './refresh-token/refresh-token.module';
 import { TasksModule } from './tasks/tasks.module';
 import { UsersModule } from './users/users.module';
@@ -67,6 +68,7 @@ import { UsersModule } from './users/users.module';
     UsersModule,
     EmployeesModule,
     TasksModule,
+    PettyCashModule,
     AdminModule,
     RefreshTokenModule,
   ],

@@ -102,6 +102,11 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+    monthlyLedgersSet      PettyCashMonthlyLedger[]      @relation("MonthlyLedgerSetBy")
+    pettyCashEntriesStaff  PettyCashLedgerEntry[]        @relation("LedgerEntryStaff")
+    pettyCashEntriesCreated PettyCashLedgerEntry[]       @relation("LedgerEntryCreatedBy")
+    pettyCashAdjustments   PettyCashBalanceAdjustment[]  @relation("AdjustmentCreatedBy")
+
   /// `email` already has a unique index from @unique — a second index on it
   /// would cost write performance and buy nothing.
   /// This composite serves the main admin screen: "list active office boys".
@@ -148,9 +153,9 @@ model Task {
   // page of 20 tasks would mean 40 extra lookups into a table with millions
   // of rows. Storing the endpoints is the cheaper trade.
   //
-  // The cancel fix is optional even when a task is cancelled: an office boy may
-  // cancel with no signal (no coordinates to record), so unlike start/end these
-  // are not guaranteed to be set on a task in that terminal state.
+  // The cancel fields are optional even when a task is cancelled: an office boy
+  // may cancel with no signal (no coordinates to record), so unlike start/end
+  // these are not guaranteed to be set on a task in that terminal state.
   startLatitude   Float?
   startLongitude  Float?
   endLatitude     Float?
@@ -210,6 +215,9 @@ model Task {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+   pettyCashEntry PettyCashLedgerEntry?
+
 
   /// "Show me this office boy's in-progress tasks" — the mobile app's home
   /// screen, and the dashboard's live-activity panel.
@@ -289,7 +297,9 @@ model ReimbursementRate {
   ratePerKm Decimal @db.Decimal(10, 2)
 
   /// Start of this rate's half-open period. Unique so two rates can never claim
-  /// the same instant and leave the lookup ambiguous.
+  /// the same instant and leave the lookup ambiguous. The @unique constraint
+  /// already indexes this column, and the report reads every row in this
+  /// order — no separate @@index is needed.
   effectiveFrom DateTime @unique
 
   /// Free-text justification ("FY27 fuel adjustment"), shown in the audit list.
@@ -301,9 +311,6 @@ model ReimbursementRate {
   createdBy   User?   @relation("RateAuthor", fields: [createdById], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
-
-  /// The report reads every row in `effectiveFrom` order to fold the periods.
-  @@index([effectiveFrom])
 }
 
 // ============================================================================
@@ -563,4 +570,287 @@ model RefreshToken {
   @@index([userId])
   /// For the scheduled cleanup of expired rows.
   @@index([expiresAt])
+}
+
+// ============================================================================
+//  PETTY CASH MODULE — schema additions
+// ============================================================================
+//  Add these enums and models to the existing schema.prisma. Two small
+//  modifications to the existing `Task` model are called out at the bottom
+//  of this file — everything else is purely additive, so nothing that
+//  currently works changes.
+//
+//  Conventions carried over from the existing schema (kept intentionally
+//  consistent rather than introducing a second style):
+//   - Money is Decimal(12,2), never Float.
+//   - People are deactivated, never deleted (isActive flags already exist
+//     on User; nothing new needed there).
+//   - Every @@index exists because a specific screen or query needs it.
+//   - Audit relations use SetNull on the "who did this" side so that
+//     deactivating a user never blocks a delete/update elsewhere, and never
+//     erases the historical record.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+//  Enums
+// ----------------------------------------------------------------------------
+
+/// How a ledger entry came to exist. This is set by the service layer based
+/// on which endpoint created it — never chosen by the caller — so it is a
+/// reliable filter for "what needs review" vs "what's system-generated".
+enum LedgerEntrySource {
+  TASK
+  MANUAL
+}
+
+/// Fixed category list, matching the "Select category..." dropdown. Modelled
+/// as an enum rather than a lookup table: the dropdown is small, admin-
+/// curated in the codebase, and category changes are rare enough that a
+/// migration is an acceptable cost for the simplicity gained. If the Admin
+/// Department later wants to self-manage categories, this is the field to
+/// promote into its own table (see recommendations in the docs).
+enum PettyCashCategory {
+  TRANSPORT
+  FUEL
+  OFFICE_SUPPLIES
+  COURIER
+  MAINTENANCE_REPAIRS
+  UTILITIES
+  MEALS_REFRESHMENTS
+  PRINTING_STATIONERY
+  GUEST_HOSPITALITY
+  MISCELLANEOUS
+  OTHER
+}
+
+enum PaymentMethod {
+  PETTY_CASH
+  BANK_TRANSFER
+}
+
+/// How a month's opening balance was determined. Kept even after the value
+/// is set so the monthly ledger can show *why* it opened where it did,
+/// without the admin having to remember or dig through adjustment history.
+enum OpeningBalanceSource {
+  CARRY_FORWARD
+  MANUAL
+}
+
+/// Adjustments are either a top-up (admin adds float mid-month) or a
+/// correction (admin removes/reduces available cash — e.g. cash found
+/// short during a physical count). Kept distinct from ordinary expense
+/// entries so the ledger's expense total is never polluted by non-expense
+/// movements.
+enum AdjustmentType {
+  TOP_UP
+  CORRECTION
+}
+
+// ----------------------------------------------------------------------------
+//  PettyCashMonthlyLedger
+// ----------------------------------------------------------------------------
+
+/// One row per calendar month. This is the container the dashboard's KPI
+/// cards (Monthly Allocation / Total Expenses / Remaining Balance / Total
+/// Entries) are computed from, and the object the monthly reset process
+/// creates.
+///
+/// `totalExpenses` and `remainingBalance` are cached here rather than
+/// computed from `entries` on every dashboard load, for the same reason
+/// `Task.distanceMeters` is cached: the dashboard is the hottest read in
+/// the module and should not re-sum potentially thousands of rows on every
+/// request. They are recomputed transactionally inside the service any
+/// time an entry or adjustment is written against this ledger — see
+/// "Balance calculation logic" in the module documentation for exactly
+/// when and how.
+model PettyCashMonthlyLedger {
+  id String @id @default(uuid())
+
+  year  Int
+  /// 1-12. Not a DateTime — a month has no day or timezone, and storing one
+  /// invites exactly the kind of "which timezone is month 1" bug the header
+  /// comment in this schema warns about elsewhere.
+  month Int
+
+  /// The amount available at the start of the month. Shown on the dashboard
+  /// as "Monthly Allocation". Either carried forward from the previous
+  /// month's `remainingBalance`, or set manually by the admin — which one
+  /// is recorded in `openingBalanceSource`.
+  openingBalance       Decimal               @db.Decimal(12, 2)
+  openingBalanceSource OpeningBalanceSource
+
+  /// Cached, recomputed on every write to this ledger's entries or
+  /// adjustments. See model-level doc above.
+  totalExpenses    Decimal @default(0) @db.Decimal(12, 2)
+  remainingBalance Decimal @db.Decimal(12, 2)
+
+  /// Set by the monthly reset job once the next month's ledger has been
+  /// created from this one. A closed ledger's entries are still readable
+  /// and editable by an admin (corrections happen after month-end), but it
+  /// no longer accepts new entries from the office-boy task flow — see
+  /// "Monthly reset process" in the docs.
+  isClosed Boolean @default(false)
+
+  /// Free-text context for how this month's opening balance was decided
+  /// ("Carried forward per Admin Dept policy", "Reset to 5000 per Farid's
+  /// approval"). Optional — most months this is self-evident.
+  note String?
+
+  /// Who opened/last adjusted this ledger's opening balance. SetNull: the
+  /// ledger is a permanent financial record and must outlive the admin
+  /// account that happened to touch it.
+  setById String?
+  setBy   User?   @relation("MonthlyLedgerSetBy", fields: [setById], references: [id], onDelete: SetNull)
+
+  entries     PettyCashLedgerEntry[]
+  adjustments PettyCashBalanceAdjustment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// A month can only be opened once. This constraint already indexes
+  /// (year, month) and backs "find this month's ledger" and "show me the
+  /// last N months" — no separate @@index is needed.
+  @@unique([year, month])
+}
+
+// ----------------------------------------------------------------------------
+//  PettyCashLedgerEntry
+// ----------------------------------------------------------------------------
+
+model PettyCashLedgerEntry {
+  id String @id @default(uuid())
+
+  monthlyLedgerId String
+  monthlyLedger   PettyCashMonthlyLedger @relation(fields: [monthlyLedgerId], references: [id], onDelete: Restrict)
+
+  /// Set by the service, never by the caller — see LedgerEntrySource doc.
+  source LedgerEntrySource
+
+  amount   Decimal           @db.Decimal(12, 2)
+  category PettyCashCategory
+
+  description String
+  /// "Supplier" on the dashboard table, "Vendor / Merchant" on the scan-
+  /// receipt panel. Denormalised even for task-derived entries (which also
+  /// have `Task.vendorDetails`) so the ledger table — the hot read — never
+  /// needs to join out to Task just to render a column.
+  supplier String?
+
+  /// The date the expense happened, distinct from `createdAt` (when the
+  /// row was written — an admin may enter last Tuesday's receipt today).
+  /// This is what "Date" and the derived "Month" column on the dashboard
+  /// are driven from — and what determines which `PettyCashMonthlyLedger`
+  /// an entry belongs to.
+  entryDate DateTime @db.Date
+
+  paymentMethod PaymentMethod @default(PETTY_CASH)
+
+  /// The staff member the expense was for/by. Optional: many manual entries
+  /// (e.g. a courier payment) have no specific staff attached. For
+  /// TASK-sourced entries the service sets this to the task's office boy
+  /// automatically.
+  staffId String?
+  staff   User?   @relation("LedgerEntryStaff", fields: [staffId], references: [id], onDelete: SetNull)
+
+  /// Present only for TASK-sourced entries. Unique because a task is
+  /// settled exactly once — `POST /tasks/:id/submit` calls this module's
+  /// createFromTask() exactly once per task (enforced by Task.submittedAt
+  /// already being non-null on retry).
+  taskId String? @unique
+  task   Task?   @relation(fields: [taskId], references: [id], onDelete: Restrict)
+
+  notes String?
+
+  receipt PettyCashReceipt?
+
+  /// Who wrote this row: the admin for manual/scan entries, or the office
+  /// boy for task-derived ones. Required — every entry is attributable.
+  /// Restrict: a financial ledger row must never lose its "who entered
+  /// this" trail, so the creator cannot be deleted (only deactivated,
+  /// which the rest of the schema already enforces for People).
+  createdById String
+  createdBy   User   @relation("LedgerEntryCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The ledger table's primary view: this month's entries, newest first.
+  @@index([monthlyLedgerId, entryDate])
+  /// Dashboard filters: "All Sources" (TASK/MANUAL) within a month.
+  @@index([monthlyLedgerId, source])
+  /// Dashboard filters: category filter within a month.
+  @@index([monthlyLedgerId, category])
+  /// "This staff member's expense history" — used if/when Total Owed to
+  /// Staff is implemented later.
+  @@index([staffId])
+}
+
+// ----------------------------------------------------------------------------
+//  PettyCashBalanceAdjustment
+// ----------------------------------------------------------------------------
+
+/// A manual movement of the available balance that is NOT an expense —
+/// top-ups and corrections. Kept as its own table rather than shoehorned
+/// into PettyCashLedgerEntry so that "Total Expenses" never has to filter
+/// out non-expense rows, and so the audit trail for "why did the balance
+/// change outside of spending" is unambiguous.
+model PettyCashBalanceAdjustment {
+  id String @id @default(uuid())
+
+  monthlyLedgerId String
+  monthlyLedger   PettyCashMonthlyLedger @relation(fields: [monthlyLedgerId], references: [id], onDelete: Restrict)
+
+  type AdjustmentType
+
+  /// Always stored positive; `type` determines whether it adds to or
+  /// subtracts from the balance. Storing the sign in the amount itself
+  /// invites a TOP_UP with a negative amount slipping through validation
+  /// unnoticed — the enum is the single source of truth for direction.
+  amount Decimal @db.Decimal(12, 2)
+
+  reason String
+
+  createdById String
+  createdBy   User   @relation("AdjustmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+
+  @@index([monthlyLedgerId, createdAt])
+}
+
+// ----------------------------------------------------------------------------
+//  PettyCashReceipt
+// ----------------------------------------------------------------------------
+
+/// Mirrors `TaskReceipt` deliberately — same reasoning applies (metadata +
+/// storageKey only, never bytes in Postgres). This table is used for
+/// MANUAL entries (including the "Scan Receipt" flow). TASK-sourced
+/// entries do NOT get a row here: their receipt already exists as
+/// `TaskReceipt` via `PettyCashLedgerEntry.task.receipt`, and duplicating
+/// it would mean two files to keep in sync for one physical receipt. The
+/// ledger read API resolves "does this entry have a receipt" by checking
+/// this relation for MANUAL entries and `task.receipt` for TASK entries —
+/// see the service's `resolveReceipt()` helper.
+model PettyCashReceipt {
+  id String @id @default(uuid())
+
+  ledgerEntryId String               @unique
+  ledgerEntry   PettyCashLedgerEntry @relation(fields: [ledgerEntryId], references: [id], onDelete: Cascade)
+
+  storageKey   String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+
+  /// Populated when the entry came through the "Scan Receipt" panel and an
+  /// OCR/extraction step ran. Null for a plain manual-entry attachment with
+  /// no scan step. Kept as raw extracted values (pre-confirmation) purely
+  /// for audit/debugging — the fields the admin actually confirmed are
+  /// what's saved on PettyCashLedgerEntry itself, not here.
+  extractedAmount Decimal?  @db.Decimal(12, 2)
+  extractedVendor String?
+  extractedDate   DateTime? @db.Date
+
+  uploadedAt DateTime @default(now())
 }
