@@ -6,11 +6,12 @@ import {
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import compression from 'compression';
+import type { NextFunction, Request, Response } from 'express';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 
 import { AppModule } from './app.module';
-import { setupSwagger } from './common/swagger/setup-swagger';
+import { DOCS_PATH, setupSwagger } from './common/swagger/setup-swagger';
 import { AppConfigService } from './config/app-config.service';
 
 async function bootstrap(): Promise<void> {
@@ -42,13 +43,34 @@ async function bootstrap(): Promise<void> {
   // helmet sets a dozen HTTP headers that turn off risky browser behaviour
   // (clickjacking via iframes, MIME-type sniffing, referrer leakage). One line,
   // and a whole category of browser-side attack becomes much harder.
-  app.use(
-    helmet({
-      // The Swagger UI page loads inline styles and scripts, which a strict
-      // Content-Security-Policy blocks. The API itself returns JSON, which a
-      // CSP does not protect, so relaxing it only where docs are served is safe.
-      contentSecurityPolicy: config.isProduction,
-    }),
+  //
+  // Two policies, because the docs page and the API are different kinds of
+  // response. Everything the API serves is JSON, which a CSP does not protect
+  // anyway; the docs page is a real browser application with assets to load.
+  const apiHelmet = helmet({ contentSecurityPolicy: config.isProduction });
+
+  // Swagger UI's assets are all same-origin, so the default policy would very
+  // nearly work. The one directive that breaks it is `upgrade-insecure-requests`
+  // — on a deployment served over plain HTTP the browser silently rewrites every
+  // asset request to https://, finds nothing listening on 443, and renders a
+  // blank page with no error the operator can see. Setting it to null removes
+  // it for this path only; the API keeps the full default policy.
+  const docsHelmet = helmet({
+    contentSecurityPolicy: config.isProduction
+      ? {
+          useDefaults: true,
+          directives: {
+            imgSrc: ["'self'", 'data:', 'https://validator.swagger.io'],
+            upgradeInsecureRequests: null,
+          },
+        }
+      : false,
+  });
+
+  app.use((request: Request, response: Response, next: NextFunction) =>
+    request.path.startsWith(`/${DOCS_PATH}`)
+      ? docsHelmet(request, response, next)
+      : apiHelmet(request, response, next),
   );
 
   // gzip responses. Location history and report payloads are highly repetitive
