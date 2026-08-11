@@ -2,6 +2,15 @@ import { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 /**
+ * Where the docs are mounted, without a leading slash.
+ *
+ * Exported because `main.ts` has to know it too: the docs page needs a slightly
+ * different Content-Security-Policy from the API, and both places must agree on
+ * the path or the exception silently stops applying.
+ */
+export const DOCS_PATH = 'api/docs';
+
+/**
  * Mounts interactive API documentation at `/api/docs`.
  *
  * Swagger reads the decorators already on our controllers and DTOs and builds
@@ -72,7 +81,7 @@ export function setupSwagger(app: INestApplication): void {
 
   const document = SwaggerModule.createDocument(app, config);
 
-  SwaggerModule.setup('api/docs', app, document, {
+  SwaggerModule.setup(DOCS_PATH, app, document, {
     swaggerOptions: {
       // Keeps your token after a page reload — a small thing that saves a lot
       // of re-authenticating while developing.
