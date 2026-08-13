@@ -30,14 +30,16 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
-import { memoryStorage } from 'multer';
 
 import { CurrentUser } from '../auth/current-user.decorator';
 import { Roles } from '../auth/roles.decorator';
 import { NoEnvelope } from '../common/decorators/no-envelope.decorator';
+import { inlineContentDisposition } from '../common/http/content-disposition';
 import { Role } from '../generated/prisma/enums';
 import { ALLOWED_RECEIPT_MIME_TYPES } from '../storage/file-type';
+import { RECEIPT_UPLOAD_OPTIONS } from '../storage/receipt-upload.options';
 import { AddLocationsDto } from './dto/add-locations.dto';
 import { CancelTaskDto } from './dto/cancel-task.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -46,28 +48,6 @@ import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
 import { LocationPointDto } from './dto/location-point.dto';
 import { SettlementDto } from './dto/settlement.dto';
 import { TasksService } from './tasks.service';
-
-/**
- * multer config for the receipt upload.
- *
- * `memoryStorage` rather than disk: the bytes have to be inspected (magic-byte
- * sniff) and handed to `StorageService`, which may not be a filesystem at all.
- * Writing them to a temp file first would add a second place they can leak from.
- *
- * `fileSize` is a hard stop applied while the stream is read, so an oversized
- * upload is aborted mid-transfer instead of being buffered in full and then
- * rejected — the difference between a bounded and an unbounded memory cost.
- * `files: 1` stops a caller sending a hundred parts under the same field name.
- *
- * The 5 MB literal duplicates the `MAX_RECEIPT_BYTES` default because decorator
- * arguments are evaluated at class-definition time, before Nest can inject
- * config. `TasksService.uploadReceipt` re-checks against the configured value,
- * so a deployment that lowers the limit is still enforced.
- */
-const RECEIPT_UPLOAD_OPTIONS = {
-  storage: memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-};
 
 /**
  * The task lifecycle and location tracking API.
@@ -81,6 +61,16 @@ const RECEIPT_UPLOAD_OPTIONS = {
 @ApiTags('Tasks')
 @ApiBearerAuth('access-token')
 @ApiUnauthorizedResponse({ description: 'Missing or invalid access token.' })
+/**
+ * Opts out of the `auth` throttler.
+ *
+ * Every throttler declared in `ThrottlerModule.forRoot` applies to EVERY route
+ * — a named throttler is not opt-in, and `@Throttle({ auth: {} })` on the login
+ * routes overrides that throttler's options rather than enabling it. Without
+ * this, the 5-requests-per-minute limit meant to slow password guessing was
+ * silently capping the whole API, so a single dashboard load 429'd.
+ */
+@SkipThrottle({ auth: true })
 @Controller({ path: 'tasks', version: '1' })
 export class TasksController {
   constructor(private readonly tasksService: TasksService) {}
@@ -337,12 +327,9 @@ export class TasksController {
 
     res.setHeader('Content-Type', receipt.mimeType);
     res.setHeader('Content-Length', receipt.sizeBytes);
-    // `inline` so the dashboard can render it in an <img>/<iframe> rather than
-    // forcing a download. The filename is quoted and stripped of quotes and
-    // control characters so a crafted upload name cannot inject a header.
     res.setHeader(
       'Content-Disposition',
-      `inline; filename="${sanitiseFilename(receipt.originalName)}"`,
+      inlineContentDisposition(receipt.originalName),
     );
 
     receipt.stream.pipe(res);
@@ -391,20 +378,4 @@ export class TasksController {
   ) {
     return this.tasksService.submit(userId, id);
   }
-}
-
-/**
- * Makes an uploaded filename safe to place inside a `Content-Disposition`
- * header.
- *
- * A filename is attacker-controlled text. Left as-is, a name containing `"` or
- * a CRLF would break out of the quoted string and let the uploader append
- * arbitrary response headers. Stripping quotes, backslashes and control
- * characters — and capping the length — removes that entirely; the result is
- * only ever a display hint.
- */
-function sanitiseFilename(name: string): string {
-  // eslint-disable-next-line no-control-regex
-  const cleaned = name.replace(/[\u0000-\u001f\u007f"\\]/g, '').trim();
-  return (cleaned || 'receipt').slice(0, 100);
 }

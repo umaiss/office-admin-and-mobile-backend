@@ -10,11 +10,12 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
-import { PettyCashCategory, PaymentMethod } from '../petty-cash.constants';
+import { PaymentMethod, PettyCashCategory } from '../../generated/prisma/enums';
 
 export class CreateManualEntryDto {
   @ApiProperty({
-    description: 'Amount spent, in the ledger currency (PKR). Must be greater than zero.',
+    description:
+      'Amount spent, in the ledger currency (PKR). Must be greater than zero.',
     example: 2145.5,
     minimum: 0.01,
   })
@@ -24,7 +25,8 @@ export class CreateManualEntryDto {
 
   @ApiProperty({
     enum: PettyCashCategory,
-    description: 'Expense category, matches the ledger dashboard\'s "Category" column.',
+    description:
+      'Expense category, matches the ledger dashboard\'s "Category" column.',
     example: PettyCashCategory.OFFICE_SUPPLIES,
   })
   @IsEnum(PettyCashCategory)
@@ -51,7 +53,8 @@ export class CreateManualEntryDto {
   supplier?: string;
 
   @ApiProperty({
-    description: 'Date the expense occurred (not the date it was entered into the system). ISO 8601 date.',
+    description:
+      'Date the expense occurred (not the date it was entered into the system). ISO 8601 date.',
     example: '2026-08-05',
   })
   @IsDateString()

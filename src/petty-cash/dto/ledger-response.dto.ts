@@ -1,10 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+import { PaginationMetaDto } from '../../common/dto/api-response.dto';
 import {
-  PettyCashCategory,
-  PaymentMethod,
   LedgerEntrySource,
   OpeningBalanceSource,
-} from '../petty-cash.constants';
+  PaymentMethod,
+  PettyCashCategory,
+} from '../../generated/prisma/enums';
 
 class StaffSummaryDto {
   @ApiProperty({ format: 'uuid' })
@@ -18,7 +20,10 @@ class ReceiptSummaryDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;
 
-  @ApiProperty({ description: 'API path to download/stream the receipt file (GET /petty-cash/entries/:id/receipt).' })
+  @ApiProperty({
+    description:
+      'API path to download/stream the receipt file (GET /petty-cash/entries/:id/receipt).',
+  })
   url!: string;
 
   @ApiProperty({ example: 'image/jpeg' })
@@ -47,7 +52,10 @@ export class LedgerEntryResponseDto {
   @ApiProperty({ example: '2026-10-24' })
   entryDate!: string;
 
-  @ApiProperty({ description: 'Calendar month label, derived from entryDate.', example: 'October' })
+  @ApiProperty({
+    description: 'Calendar month label, derived from entryDate.',
+    example: 'October',
+  })
   month!: string;
 
   @ApiProperty({ enum: PaymentMethod })
@@ -56,7 +64,10 @@ export class LedgerEntryResponseDto {
   @ApiPropertyOptional({ type: StaffSummaryDto })
   staff?: StaffSummaryDto;
 
-  @ApiPropertyOptional({ format: 'uuid', description: 'Present only for TASK-sourced entries.' })
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Present only for TASK-sourced entries.',
+  })
   taskId?: string;
 
   @ApiPropertyOptional()
@@ -72,6 +83,20 @@ export class LedgerEntryResponseDto {
   })
   runningBalance!: number;
 
+  @ApiProperty({
+    description:
+      "True when this entry was filed automatically and something about it needs checking — an unread receipt total, a figure that disagrees with the office boy's, or a low-confidence read. Clear it with POST /petty-cash/entries/:id/approve.",
+    example: false,
+  })
+  needsReview!: boolean;
+
+  @ApiPropertyOptional({
+    description: 'What to check. Present only when needsReview is true.',
+    example:
+      'The receipt shows 2145.5 but the office boy recorded 2000 — a difference of 145.5.',
+  })
+  reviewNote?: string;
+
   @ApiProperty({ type: StaffSummaryDto, description: 'Who created this row.' })
   createdBy!: StaffSummaryDto;
 
@@ -83,18 +108,21 @@ export class LedgerEntryResponseDto {
   }
 }
 
+/**
+ * The same `{ data, meta }` envelope every other list endpoint returns, built
+ * by the shared `buildPaginationMeta` helper. Petty cash previously returned a
+ * flat `{ data, page, pageSize, totalCount }`, which meant a client needed a
+ * second unwrapper for this one module.
+ */
 export class PaginatedLedgerResponseDto {
   @ApiProperty({ type: [LedgerEntryResponseDto] })
   data!: LedgerEntryResponseDto[];
 
-  @ApiProperty({ example: 1 })
-  page!: number;
-
-  @ApiProperty({ example: 20 })
-  pageSize!: number;
-
-  @ApiProperty({ example: 45, description: 'Total entries matching the filters, across all pages.' })
-  totalCount!: number;
+  @ApiProperty({
+    type: PaginationMetaDto,
+    description: 'Totals cover the whole filtered set, not just this page.',
+  })
+  meta!: PaginationMetaDto;
 }
 
 export class MonthlySummaryResponseDto {
@@ -107,7 +135,10 @@ export class MonthlySummaryResponseDto {
   @ApiProperty({ example: 10 })
   month!: number;
 
-  @ApiProperty({ example: 5000.0, description: 'Shown on the dashboard as "Monthly Allocation".' })
+  @ApiProperty({
+    example: 5000.0,
+    description: 'Shown on the dashboard as "Monthly Allocation".',
+  })
   openingBalance!: number;
 
   @ApiProperty({ enum: OpeningBalanceSource })
@@ -119,7 +150,11 @@ export class MonthlySummaryResponseDto {
   @ApiProperty({ example: 2854.5 })
   remainingBalance!: number;
 
-  @ApiProperty({ example: 3, description: 'Count of ledger entries in this month (calculated, not stored).' })
+  @ApiProperty({
+    example: 3,
+    description:
+      'Count of ledger entries in this month (calculated, not stored).',
+  })
   totalEntries!: number;
 
   @ApiProperty()

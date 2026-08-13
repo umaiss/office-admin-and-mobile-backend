@@ -10,7 +10,7 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
-import { PettyCashCategory, PaymentMethod } from '../petty-cash.constants';
+import { PaymentMethod, PettyCashCategory } from '../../generated/prisma/enums';
 
 /**
  * Backs the "Confirm Scanned Data" step of the Scan Receipt panel. The
@@ -55,7 +55,10 @@ export class ConfirmScanEntryDto {
   @MaxLength(500)
   description?: string;
 
-  @ApiPropertyOptional({ enum: PaymentMethod, default: PaymentMethod.PETTY_CASH })
+  @ApiPropertyOptional({
+    enum: PaymentMethod,
+    default: PaymentMethod.PETTY_CASH,
+  })
   @IsOptional()
   @IsEnum(PaymentMethod)
   paymentMethod?: PaymentMethod = PaymentMethod.PETTY_CASH;

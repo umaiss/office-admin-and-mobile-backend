@@ -1,5 +1,5 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
-import { PartialType, OmitType } from '@nestjs/swagger';
+import { OmitType, PartialType } from '@nestjs/swagger';
+
 import { CreateManualEntryDto } from './create-manual-entry.dto';
 
 /**

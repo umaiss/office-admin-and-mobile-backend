@@ -77,6 +77,12 @@ export function setupSwagger(app: INestApplication): void {
       'Dashboard views across every office boy: tasks, statistics, ' +
         'reimbursements, the per-km rate, the petty cash receipts feed, and exports',
     )
+    .addTag(
+      'Petty Cash',
+      'The monthly ledger: opening balances, entries, adjustments, and the ' +
+        'Scan Receipt flow — upload a receipt and it is either filed ' +
+        'automatically or returned for the admin to confirm',
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

@@ -149,6 +149,29 @@ export const envSchema = z.object({
     .max(52_428_800)
     .default(5_242_880),
 
+  // ---- Receipt extraction (Claude) -----------------------------------------
+  // Optional on purpose. Without a key the scan endpoint still works — it
+  // stores the receipt and returns no suggestions, exactly as it did before
+  // extraction existed — so a missing key degrades the feature rather than
+  // breaking the module. This is the one place we prefer degrading to failing
+  // fast: an admin can always type the four fields in by hand.
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+
+  // Pinned rather than defaulted-and-forgotten: a model change alters both the
+  // cost per receipt and the extraction quality, so it should be a deliberate
+  // edit to the environment, visible in a diff.
+  ANTHROPIC_MODEL: z.string().min(1).default('claude-opus-5'),
+
+  // How sure the model must be before a scanned receipt becomes a ledger entry
+  // with no human review. Below this the extracted values are returned as
+  // suggestions for the admin to confirm.
+  //
+  // 0.85 is deliberately cautious: a wrong auto-created entry is a financial
+  // record someone has to notice and correct, whereas a needless confirmation
+  // screen costs one click. Raise it towards 1 to send more receipts to review,
+  // lower it once you have seen how the model performs on your own receipts.
+  RECEIPT_AUTOCREATE_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.85),
+
   // ---- Reporting -----------------------------------------------------------
   // Offset, in minutes, from UTC to the calendar day the business reports on.
   //
