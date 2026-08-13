@@ -10,6 +10,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { callArg, firstArg } from '../common/testing/mock-args';
 import { AppConfigService } from '../config/app-config.service';
 import { Role, TaskStatus } from '../generated/prisma/enums';
+import { PettyCashService } from '../petty-cash/petty-cash.service';
+import { ReceiptExtractionService } from '../petty-cash/receipt-extraction.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReimbursementRateService } from '../reimbursement/reimbursement-rate.service';
 import { StorageService } from '../storage/storage.service';
@@ -32,6 +34,7 @@ describe('TasksService', () => {
   let prisma: {
     task: {
       findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
       findMany: jest.Mock;
       upsert: jest.Mock;
       update: jest.Mock;
@@ -56,6 +59,8 @@ describe('TasksService', () => {
     exists: jest.Mock;
   };
   let rates: { forOfficeBoy: jest.Mock };
+  let pettyCash: { createFromTask: jest.Mock };
+  let extractor: { extract: jest.Mock };
 
   const OWNER_ID = 'owner-1';
   const OTHER_ID = 'someone-else';
@@ -86,6 +91,16 @@ describe('TasksService', () => {
     prisma = {
       task: {
         findUnique: jest.fn(),
+        // `submit` re-reads the settlement columns `loadOwnedTask` does not
+        // select. Default to a task with no money moved, so the petty-cash
+        // booking is skipped unless a test opts into it.
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          description: 'Fetch documents',
+          vendorDetails: null,
+          amountReceived: 0,
+          amountReturned: 0,
+          endedAt: new Date('2026-08-10T10:00:00.000Z'),
+        }),
         findMany: jest.fn(),
         upsert: jest.fn(),
         update: jest.fn(),
@@ -101,11 +116,19 @@ describe('TasksService', () => {
         upsert: jest.fn(),
         delete: jest.fn(),
       },
-      // stats runs its aggregates inside one $transaction([...]) — resolve the
-      // array of promises the service passes, mirroring Prisma's behaviour.
-      $transaction: jest.fn((ops: unknown) =>
-        Array.isArray(ops) ? Promise.all(ops as Promise<unknown>[]) : undefined,
-      ),
+      // Prisma's $transaction has two shapes and the service uses both: `stats`
+      // passes an array of queries, `submit` passes a callback that receives the
+      // transaction client. Mirror both — hand the callback `prisma` itself, so
+      // writes inside the transaction land on the same mocks as writes outside.
+      $transaction: jest.fn((ops: unknown) => {
+        if (Array.isArray(ops)) {
+          return Promise.all(ops as Promise<unknown>[]);
+        }
+        if (typeof ops === 'function') {
+          return (ops as (tx: unknown) => unknown)(prisma);
+        }
+        return undefined;
+      }),
     };
 
     storage = {
@@ -129,12 +152,20 @@ describe('TasksService', () => {
       }),
     };
 
+    pettyCash = { createFromTask: jest.fn().mockResolvedValue({}) };
+
+    // Default: the extractor reads nothing. Tests that care about the receipt
+    // driving the entry opt into a real result.
+    extractor = { extract: jest.fn().mockResolvedValue({ confidence: 0 }) };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TasksService,
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: storage },
         { provide: ReimbursementRateService, useValue: rates },
+        { provide: PettyCashService, useValue: pettyCash },
+        { provide: ReceiptExtractionService, useValue: extractor },
         {
           provide: AppConfigService,
           useValue: { maxReceiptBytes: 5_242_880, reportTzOffsetMinutes: 0 },
@@ -503,6 +534,102 @@ describe('TasksService', () => {
         ConflictException,
       );
     });
+
+    // ------------------------------------------------------------------------
+    //  The receipt drives the ledger entry
+    // ------------------------------------------------------------------------
+    /** A settled task, optionally carrying what was read off its receipt. */
+    const settledTask = (receipt: Record<string, unknown> | null) => ({
+      description: 'Deliver documents',
+      vendorDetails: 'typed vendor',
+      amountReceived: 500,
+      amountReturned: 100,
+      endedAt: new Date('2026-08-10T10:00:00.000Z'),
+      receipt,
+    });
+
+    const submitSettled = async (receipt: Record<string, unknown> | null) => {
+      prisma.task.findUnique.mockResolvedValue(
+        guardRow({ status: TaskStatus.COMPLETED }),
+      );
+      prisma.task.findUniqueOrThrow.mockResolvedValue(settledTask(receipt));
+      prisma.task.update.mockResolvedValue({});
+
+      await service.submit(OWNER_ID, TASK_ID);
+      return firstArg(pettyCash.createFromTask) as Record<string, unknown>;
+    };
+
+    it("books the receipt's total, not the typed net", async () => {
+      const booked = await submitSettled({
+        extractedAmount: 2145.5,
+        extractedVendor: 'Shell Petrol Station',
+        extractedDate: new Date('2026-08-05T00:00:00.000Z'),
+        extractedCategory: 'FUEL',
+        extractedDescription: 'Diesel, 32 litres',
+        extractionConfidence: 0.95,
+      });
+
+      // The receipt is the evidence; 400 is what he typed.
+      expect(booked.amountSpent).toBe(2145.5);
+      expect(booked.typedNetAmount).toBe(400);
+      expect(booked.scanned).toMatchObject({
+        amount: 2145.5,
+        vendor: 'Shell Petrol Station',
+        category: 'FUEL',
+        date: '2026-08-05',
+      });
+    });
+
+    it('falls back to the typed net when the receipt had no readable total', async () => {
+      const booked = await submitSettled({
+        extractedAmount: null,
+        extractedVendor: null,
+        extractedDate: null,
+        extractedCategory: null,
+        extractedDescription: null,
+        extractionConfidence: 0,
+      });
+
+      expect(booked.amountSpent).toBe(400);
+      expect(booked.typedNetAmount).toBe(400);
+    });
+
+    it('books the typed net when there is no receipt at all', async () => {
+      const booked = await submitSettled(null);
+
+      expect(booked.amountSpent).toBe(400);
+      expect(booked.scanned).toBeUndefined();
+    });
+
+    it('books an expense from the receipt even when he recorded no amounts', async () => {
+      // Without this, an office boy who uploads his receipt but forgets the
+      // amounts boxes produces no ledger row at all — the expense vanishes.
+      prisma.task.findUnique.mockResolvedValue(
+        guardRow({ status: TaskStatus.COMPLETED }),
+      );
+      prisma.task.findUniqueOrThrow.mockResolvedValue({
+        ...settledTask({
+          extractedAmount: 780,
+          extractedVendor: 'Metro',
+          extractedDate: new Date('2026-08-10T00:00:00.000Z'),
+          extractedCategory: 'OFFICE_SUPPLIES',
+          extractedDescription: 'A4 paper',
+          extractionConfidence: 0.9,
+        }),
+        amountReceived: 0,
+        amountReturned: 0,
+      });
+      prisma.task.update.mockResolvedValue({});
+
+      await service.submit(OWNER_ID, TASK_ID);
+
+      const booked = firstArg(pettyCash.createFromTask) as Record<
+        string,
+        unknown
+      >;
+      expect(booked.amountSpent).toBe(780);
+      expect(booked.typedNetAmount).toBe(0);
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -533,6 +660,61 @@ describe('TasksService', () => {
       // The client's filename is stored for display only — never as the key.
       expect(create.originalName).toBe('receipt.jpg');
       expect(create.storageKey).not.toContain('receipt.jpg');
+    });
+
+    it('reads the receipt and stores what the extractor found', async () => {
+      // Extraction happens at upload, while the bytes are in memory, so the
+      // office boy can retake a bad photo and submit stays free of a network
+      // call to an external service.
+      extractor.extract.mockResolvedValue({
+        amount: 2145.5,
+        vendor: 'Shell Petrol Station',
+        date: '2026-08-05',
+        category: 'FUEL',
+        description: 'Diesel, 32 litres',
+        confidence: 0.95,
+      });
+
+      await service.uploadReceipt(OWNER_ID, TASK_ID, uploadedFile());
+
+      // The sniffed type reaches the extractor, not the client's claim.
+      expect(callArg(extractor.extract, 0, 1)).toBe('image/jpeg');
+
+      const create = firstArg(prisma.taskReceipt.upsert).create as Record<
+        string,
+        unknown
+      >;
+      expect(create.extractedAmount).toBe(2145.5);
+      expect(create.extractedVendor).toBe('Shell Petrol Station');
+      expect(create.extractedCategory).toBe('FUEL');
+      expect(create.extractedDescription).toBe('Diesel, 32 litres');
+      expect(create.extractionConfidence).toBe(0.95);
+      expect(create.extractedDate).toEqual(new Date('2026-08-05'));
+    });
+
+    it('still accepts the receipt when extraction reads nothing', async () => {
+      // A blurry photo, an outage, or no API key must never stop an office boy
+      // attaching his receipt.
+      extractor.extract.mockResolvedValue({
+        confidence: 0,
+        failureReason: 'Extraction service unavailable.',
+      });
+
+      await expect(
+        service.uploadReceipt(OWNER_ID, TASK_ID, uploadedFile()),
+      ).resolves.toBeDefined();
+
+      const create = firstArg(prisma.taskReceipt.upsert).create as Record<
+        string,
+        unknown
+      >;
+      expect(create.extractedAmount).toBeUndefined();
+      expect(create.extractionConfidence).toBe(0);
+      expect(create.storageKey).toBe('receipts/2026/08/generated.jpg');
+      // Kept so the review note can blame the system rather than the photo.
+      expect(create.extractionFailureReason).toBe(
+        'Extraction service unavailable.',
+      );
     });
 
     it('rejects a file whose bytes are not an accepted image, however it is named', async () => {

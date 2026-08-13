@@ -25,7 +25,7 @@ export class SetOpeningBalanceDto {
 
   @ApiPropertyOptional({
     description:
-      'Manually define the opening balance. Omit this field entirely to carry forward the previous month\'s remaining balance instead.',
+      "Manually define the opening balance. Omit this field entirely to carry forward the previous month's remaining balance instead.",
     example: 5000,
   })
   @IsOptional()
@@ -33,7 +33,10 @@ export class SetOpeningBalanceDto {
   @IsPositive()
   amount?: number;
 
-  @ApiPropertyOptional({ maxLength: 500, example: 'Reset to standard monthly float per Admin Dept policy' })
+  @ApiPropertyOptional({
+    maxLength: 500,
+    example: 'Reset to standard monthly float per Admin Dept policy',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(500)

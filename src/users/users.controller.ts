@@ -17,6 +17,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 
 import { Roles } from '../auth/roles.decorator';
 import { Role } from '../generated/prisma/enums';
@@ -47,6 +48,16 @@ import { UsersService } from './users.service';
   description: 'Authenticated, but not an administrator.',
 })
 @Roles(Role.ADMIN)
+/**
+ * Opts out of the `auth` throttler.
+ *
+ * Every throttler declared in `ThrottlerModule.forRoot` applies to EVERY route
+ * — a named throttler is not opt-in, and `@Throttle({ auth: {} })` on the login
+ * routes overrides that throttler's options rather than enabling it. Without
+ * this, the 5-requests-per-minute limit meant to slow password guessing was
+ * silently capping the whole API, so a single dashboard load 429'd.
+ */
+@SkipThrottle({ auth: true })
 @Controller({ path: 'users', version: '1' })
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}

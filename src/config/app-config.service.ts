@@ -157,6 +157,36 @@ export class AppConfigService {
     return this.read('MAX_RECEIPT_BYTES');
   }
 
+  // ---- Receipt extraction --------------------------------------------------
+  /**
+   * Claude API key, or undefined when extraction is not configured.
+   *
+   * Genuinely optional — `ReceiptExtractionService` reports itself unavailable
+   * when this is absent and the scan flow falls back to manual entry, so a
+   * deployment without a key is a supported configuration, not a broken one.
+   */
+  get anthropicApiKey(): string | undefined {
+    return this.read('ANTHROPIC_API_KEY');
+  }
+
+  /** Model used to read receipts. */
+  get anthropicModel(): string {
+    return this.read('ANTHROPIC_MODEL');
+  }
+
+  /** True when a key is configured and receipt extraction can run. */
+  get receiptExtractionEnabled(): boolean {
+    return this.anthropicApiKey !== undefined;
+  }
+
+  /**
+   * Confidence at or above which a scanned receipt becomes a ledger entry with
+   * no human review. See `env.schema.ts` for why the default is cautious.
+   */
+  get receiptAutoCreateConfidence(): number {
+    return this.read('RECEIPT_AUTOCREATE_CONFIDENCE');
+  }
+
   // ---- Reporting -----------------------------------------------------------
   /**
    * Minutes to add to UTC to reach the calendar day reports are bucketed by.

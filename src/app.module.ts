@@ -44,8 +44,15 @@ import { UsersModule } from './users/users.module';
       inject: [AppConfigService],
       useFactory: (config: AppConfigService) => ({
         throttlers: [
-          // Named throttlers. Routes get 'default' unless they opt into a
-          // stricter one with @Throttle({ auth: {} }).
+          // BOTH of these apply to EVERY route. A named throttler is not
+          // opt-in: `@Throttle({ auth: {} })` on the login routes overrides
+          // that throttler's options there, it does not switch it on. Anything
+          // that should not be held to the auth limit therefore has to opt OUT
+          // with `@SkipThrottle({ auth: true })` — see the controllers.
+          //
+          // Getting this backwards capped the entire API at the auth limit of
+          // a few requests a minute, which looked like a client bug for as
+          // long as nobody read the 429's `Retry-After-auth` header.
           {
             name: 'default',
             ttl: config.throttleTtlSeconds * 1000,

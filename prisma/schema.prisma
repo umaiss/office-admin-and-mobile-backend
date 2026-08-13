@@ -102,10 +102,11 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-    monthlyLedgersSet      PettyCashMonthlyLedger[]      @relation("MonthlyLedgerSetBy")
-    pettyCashEntriesStaff  PettyCashLedgerEntry[]        @relation("LedgerEntryStaff")
-    pettyCashEntriesCreated PettyCashLedgerEntry[]       @relation("LedgerEntryCreatedBy")
-    pettyCashAdjustments   PettyCashBalanceAdjustment[]  @relation("AdjustmentCreatedBy")
+  monthlyLedgersSet       PettyCashMonthlyLedger[]     @relation("MonthlyLedgerSetBy")
+  pettyCashEntriesStaff   PettyCashLedgerEntry[]       @relation("LedgerEntryStaff")
+  pettyCashEntriesCreated PettyCashLedgerEntry[]       @relation("LedgerEntryCreatedBy")
+  pettyCashAdjustments    PettyCashBalanceAdjustment[] @relation("AdjustmentCreatedBy")
+  pendingReceiptScans     PendingReceiptScan[]         @relation("ScanUploadedBy")
 
   /// `email` already has a unique index from @unique — a second index on it
   /// would cost write performance and buy nothing.
@@ -216,8 +217,7 @@ model Task {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-   pettyCashEntry PettyCashLedgerEntry?
-
+  pettyCashEntry PettyCashLedgerEntry?
 
   /// "Show me this office boy's in-progress tasks" — the mobile app's home
   /// screen, and the dashboard's live-activity panel.
@@ -273,7 +273,40 @@ model TaskReceipt {
   mimeType     String
   sizeBytes    Int
 
+  /// SHA-256 of the file's bytes, for duplicate detection.
+  ///
+  /// Nullable because receipts uploaded before this column existed have no
+  /// hash and cannot be back-filled without re-reading every stored file.
+  /// Those rows simply do not participate in duplicate matching.
+  contentHash String?
+
+  /// What the extractor read off this receipt when the office boy uploaded it.
+  ///
+  /// Captured at upload, while the bytes are already in memory, rather than at
+  /// submit — it gives the office boy immediate feedback and keeps the submit
+  /// path free of a network call to an external service. All nullable: a photo
+  /// too blurry to read, or a deployment with no API key, must still be an
+  /// acceptable receipt.
+  extractedAmount      Decimal?           @db.Decimal(12, 2)
+  extractedVendor      String?
+  extractedDate        DateTime?          @db.Date
+  extractedCategory    PettyCashCategory?
+  extractedDescription String?
+  /// 0-1, or null when extraction never ran.
+  extractionConfidence Float?
+
+  /// Why extraction produced nothing, when the cause was the system rather
+  /// than the photo — an outage, a rate limit, no API key.
+  ///
+  /// Stored because the two cases need different words in front of an admin.
+  /// "No total could be read" tells them to go and look at the receipt; if the
+  /// truth is that the reader was offline, that sends them chasing a photo
+  /// which was probably fine. Null for an ordinary unreadable receipt.
+  extractionFailureReason String?
+
   uploadedAt DateTime @default(now())
+
+  @@index([contentHash])
 }
 
 // ============================================================================
@@ -676,7 +709,7 @@ model PettyCashMonthlyLedger {
   /// as "Monthly Allocation". Either carried forward from the previous
   /// month's `remainingBalance`, or set manually by the admin — which one
   /// is recorded in `openingBalanceSource`.
-  openingBalance       Decimal               @db.Decimal(12, 2)
+  openingBalance       Decimal              @db.Decimal(12, 2)
   openingBalanceSource OpeningBalanceSource
 
   /// Cached, recomputed on every write to this ledger's entries or
@@ -735,7 +768,7 @@ model PettyCashLedgerEntry {
   /// receipt panel. Denormalised even for task-derived entries (which also
   /// have `Task.vendorDetails`) so the ledger table — the hot read — never
   /// needs to join out to Task just to render a column.
-  supplier String?
+  supplier    String?
 
   /// The date the expense happened, distinct from `createdAt` (when the
   /// row was written — an admin may enter last Tuesday's receipt today).
@@ -762,6 +795,23 @@ model PettyCashLedgerEntry {
 
   notes String?
 
+  /// True when this entry was filed automatically but something about it needs
+  /// an admin's eyes before it can be trusted.
+  ///
+  /// Exists because of the office boy path: his receipt files an entry with no
+  /// human in the loop, so a blurry photo, an unreadable total, or an amount
+  /// that disagrees with the cash he actually handed back has to surface
+  /// somewhere. Refusing to file the entry would be worse — the expense
+  /// happened either way, and an unrecorded expense is invisible. So it is
+  /// filed and flagged.
+  ///
+  /// Cleared by `POST /petty-cash/entries/:id/approve`, or by editing the
+  /// entry, which is itself an act of review.
+  needsReview Boolean @default(false)
+
+  /// What an admin should check, in a sentence. Null when needsReview is false.
+  reviewNote String?
+
   receipt PettyCashReceipt?
 
   /// Who wrote this row: the admin for manual/scan entries, or the office
@@ -783,6 +833,8 @@ model PettyCashLedgerEntry {
   @@index([monthlyLedgerId, category])
   /// "This staff member's expense history" — used if/when Total Owed to
   /// Staff is implemented later.
+  /// The admin's review queue: "what needs my attention".
+  @@index([needsReview])
   @@index([staffId])
 }
 
@@ -852,5 +904,72 @@ model PettyCashReceipt {
   extractedVendor String?
   extractedDate   DateTime? @db.Date
 
+  /// SHA-256 of the file's bytes, for duplicate detection. Nullable for the
+  /// same reason as on TaskReceipt — pre-existing rows have no hash.
+  contentHash String?
+
   uploadedAt DateTime @default(now())
+
+  @@index([contentHash])
+}
+
+// ----------------------------------------------------------------------------
+//  PendingReceiptScan
+// ----------------------------------------------------------------------------
+/// A receipt that has been uploaded and read by the extraction model, but has
+/// not yet become a ledger entry.
+///
+/// This lives in the database rather than in process memory for one reason:
+/// once a high-confidence scan can create a ledger entry on its own, a pending
+/// scan is money in flight. An in-process map loses it on every deploy or
+/// restart, and cannot be shared if the API is ever run as more than one
+/// instance — the admin would be told to re-scan a receipt they already
+/// uploaded, with the file already sitting in storage.
+///
+/// Rows are short-lived: `expiresAt` is set on write and expired rows (plus
+/// their stored files) are swept whenever the scan routes are used.
+model PendingReceiptScan {
+  id String @id @default(uuid())
+
+  /// The opaque handle the client exchanges to confirm this scan. Unique
+  /// because it is the sole lookup key on the confirm route.
+  uploadToken String @unique
+
+  storageKey   String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+
+  /// SHA-256 of the file's bytes. Not nullable here: every pending scan is
+  /// created by code that already computes the hash, and a scan awaiting
+  /// confirmation is exactly what a second upload of the same receipt needs
+  /// to be matched against.
+  contentHash String
+
+  /// What the model read off the receipt. All optional: a blurry photo, an
+  /// unsupported layout, or an absent API key all legitimately produce nothing,
+  /// and the admin then fills the fields in by hand.
+  extractedAmount      Decimal?           @db.Decimal(12, 2)
+  extractedVendor      String?
+  extractedDate        DateTime?          @db.Date
+  extractedDescription String?
+  suggestedCategory    PettyCashCategory?
+
+  /// 0-1. Above the configured threshold the entry is created automatically;
+  /// below it the client shows the values for the admin to confirm or correct.
+  confidence Float @default(0)
+
+  /// Set when the model declined to read the image, or the call failed. Kept so
+  /// a support question about a receipt that "did nothing" has an answer.
+  failureReason String?
+
+  uploadedById String
+  uploadedBy   User   @relation("ScanUploadedBy", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  /// The sweep deletes by expiry, so that is what gets the index.
+  @@index([contentHash])
+  @@index([expiresAt])
 }

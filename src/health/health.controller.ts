@@ -5,6 +5,7 @@ import {
   VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 
 import { Public } from '../auth/decorators/public.decorator';
 import { NoEnvelope } from '../common/decorators/no-envelope.decorator';
@@ -32,6 +33,16 @@ import { PrismaService } from '../prisma/prisma.service';
 // Probes must be reachable without credentials — a load balancer has no token,
 // and a health check that returns 401 reads as "this instance is broken".
 @Public()
+/**
+ * Opts out of the `auth` throttler.
+ *
+ * Every throttler declared in `ThrottlerModule.forRoot` applies to EVERY route
+ * — a named throttler is not opt-in, and `@Throttle({ auth: {} })` on the login
+ * routes overrides that throttler's options rather than enabling it. Without
+ * this, the 5-requests-per-minute limit meant to slow password guessing was
+ * silently capping the whole API, so a single dashboard load 429'd.
+ */
+@SkipThrottle({ auth: true })
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}

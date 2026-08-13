@@ -17,8 +17,10 @@ import {
 import { todayUtcRange } from '../common/time/today-range';
 import { Role, TaskStatus } from '../generated/prisma/enums';
 import { PettyCashService } from '../petty-cash/petty-cash.service';
+import { ReceiptExtractionService } from '../petty-cash/receipt-extraction.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReimbursementRateService } from '../reimbursement/reimbursement-rate.service';
+import { contentHash } from '../storage/content-hash';
 import { sniffMimeType } from '../storage/file-type';
 import { StorageService } from '../storage/storage.service';
 import {
@@ -113,6 +115,7 @@ export class TasksService {
     private readonly rates: ReimbursementRateService,
     private readonly config: AppConfigService,
     private readonly pettyCash: PettyCashService,
+    private readonly extractor: ReceiptExtractionService,
   ) {}
 
   async create(userId: string, dto: CreateTaskDto) {
@@ -397,7 +400,8 @@ export class TasksService {
     }
 
     // Settlement fields aren't on TaskGuardRow (loadOwnedTask only selects the
-    // state-machine columns) — fetch what createFromTask() needs separately.
+    // state-machine columns) — fetch what createFromTask() needs separately,
+    // along with whatever the extractor read off the receipt at upload.
     const settlement = await this.prisma.task.findUniqueOrThrow({
       where: { id: taskId },
       select: {
@@ -406,48 +410,83 @@ export class TasksService {
         amountReceived: true,
         amountReturned: true,
         endedAt: true,
+        receipt: {
+          select: {
+            extractedAmount: true,
+            extractedVendor: true,
+            extractedDate: true,
+            extractedCategory: true,
+            extractedDescription: true,
+            extractionConfidence: true,
+            extractionFailureReason: true,
+          },
+        },
       },
     });
 
     const netAmount =
       Math.round(
-        ((decimalToNumber(settlement.amountReceived as never) ?? 0) -
-          (decimalToNumber(settlement.amountReturned as never) ?? 0)) *
+        ((decimalToNumber(settlement.amountReceived) ?? 0) -
+          (decimalToNumber(settlement.amountReturned) ?? 0)) *
           100,
       ) / 100;
 
-    const updated = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { submittedAt: new Date() },
-      select: TASK_SELECT,
-    });
+    const receipt = settlement.receipt;
+    const scanned = receipt
+      ? {
+          amount: decimalToNumber(receipt.extractedAmount) ?? undefined,
+          vendor: receipt.extractedVendor ?? undefined,
+          date: receipt.extractedDate?.toISOString().slice(0, 10),
+          category: receipt.extractedCategory ?? undefined,
+          description: receipt.extractedDescription ?? undefined,
+          confidence: receipt.extractionConfidence ?? 0,
+          failureReason: receipt.extractionFailureReason ?? undefined,
+        }
+      : undefined;
 
-    // Book the petty-cash entry only when money actually moved. A task
-    // submitted with no settlement recorded (netAmount === 0) still submits
-    // normally, but produces no ledger row — nothing there for an admin to
-    // review or reconcile.
+    // The receipt is the evidence, so it decides the amount when it was read
+    // clearly. The typed net is the fallback — and, when both exist, the thing
+    // the extracted amount gets checked against inside createFromTask.
+    const amountSpent = scanned?.amount ?? netAmount;
+
+    // Marking the task submitted and booking its expense are one atomic step.
     //
-    // NOTE: this write is NOT in the same transaction as the submittedAt
-    // update above. If this throws — most likely because no petty cash
-    // ledger is open for this task's endedAt month (see
-    // PettyCashService.requireMonth, a deliberate fail-loud choice) — the
-    // task is left submitted with its expense unbooked. That failure
-    // propagates to the caller rather than being swallowed, so it's visible,
-    // but it does mean the two records can end up out of sync until someone
-    // retries or an admin opens the month. Making this fully atomic would
-    // mean PettyCashService.createFromTask accepting an external Prisma
-    // transaction client instead of opening its own — a larger refactor,
-    // flagged here rather than made silently.
-    if (netAmount > 0) {
-      await this.pettyCash.createFromTask({
-        taskId,
-        officeBoyId: userId,
-        amountSpent: netAmount,
-        vendorDetails: settlement.vendorDetails ?? undefined,
-        description: settlement.description,
-        entryDate: settlement.endedAt ?? new Date(),
+    // `submittedAt` is a one-way door: the guard above rejects any second
+    // attempt. So if these two writes could come apart — the task submitted,
+    // the ledger write failed because no petty cash month was open — the
+    // expense would be permanently unbookable, with no route left to record
+    // it. Inside one transaction, that failure instead rolls the whole submit
+    // back: the task stays unsubmitted and the office boy can simply retry
+    // once an admin opens the month.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const task = await tx.task.update({
+        where: { id: taskId },
+        data: { submittedAt: new Date() },
+        select: TASK_SELECT,
       });
-    }
+
+      // Book the petty-cash entry when money moved — either the office boy
+      // recorded amounts, or his receipt shows a total. A task with neither
+      // still submits normally and produces no ledger row; there is nothing to
+      // reconcile.
+      if (amountSpent > 0) {
+        await this.pettyCash.createFromTask(
+          {
+            taskId,
+            officeBoyId: userId,
+            amountSpent,
+            typedNetAmount: netAmount,
+            vendorDetails: settlement.vendorDetails ?? undefined,
+            description: settlement.description,
+            entryDate: settlement.endedAt ?? new Date(),
+            scanned,
+          },
+          tx,
+        );
+      }
+
+      return task;
+    });
 
     return toTaskResponse(updated);
   }
@@ -511,11 +550,31 @@ export class TasksService {
       namespace: 'receipts',
     });
 
+    // Read the receipt now, while the bytes are already in memory. Doing it
+    // here rather than at submit gives the office boy immediate feedback on a
+    // photo he can still retake, and keeps the submit path — which books real
+    // money — free of a call to an external service.
+    //
+    // Never throws: a blurry photo, an outage, or no API key all come back as
+    // confidence 0, and the entry is filed from his typed amounts instead.
+    const extraction = await this.extractor.extract(file.buffer, mimeType);
+
     const receiptData = {
       storageKey: stored.key,
       originalName: file.originalname,
       mimeType: stored.mimeType,
       sizeBytes: stored.sizeBytes,
+      // Recorded so this receipt participates in duplicate detection. The same
+      // photo filed once through a task and again through the admin's scan
+      // panel is one expense, and only the hash makes that visible.
+      contentHash: contentHash(file.buffer),
+      extractedAmount: extraction.amount,
+      extractedVendor: extraction.vendor,
+      extractedDate: extraction.date ? new Date(extraction.date) : null,
+      extractedCategory: extraction.category,
+      extractedDescription: extraction.description,
+      extractionConfidence: extraction.confidence,
+      extractionFailureReason: extraction.failureReason ?? null,
       uploadedAt: new Date(),
     };
 

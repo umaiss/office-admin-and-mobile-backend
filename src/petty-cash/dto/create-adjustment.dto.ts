@@ -1,6 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsNotEmpty, IsNumber, IsPositive, IsString, MaxLength } from 'class-validator';
-import { AdjustmentType } from '../petty-cash.constants';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsNumber,
+  IsPositive,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import { AdjustmentType } from '../../generated/prisma/enums';
 
 export class CreateAdjustmentDto {
   @ApiProperty({ enum: AdjustmentType, example: AdjustmentType.TOP_UP })
@@ -8,7 +15,8 @@ export class CreateAdjustmentDto {
   type!: AdjustmentType;
 
   @ApiProperty({
-    description: 'Always positive. `type` determines whether this adds to or subtracts from the balance.',
+    description:
+      'Always positive. `type` determines whether this adds to or subtracts from the balance.',
     example: 1000,
     minimum: 0.01,
   })
