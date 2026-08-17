@@ -172,6 +172,7 @@ export class TasksService {
       total,
       completedToday,
       completedTotals,
+      completedTodayTotals,
       pendingSubmission,
     ] = await this.prisma.$transaction([
       this.prisma.task.groupBy({
@@ -195,6 +196,20 @@ export class TasksService {
           durationSeconds: true,
           amountReceived: true,
           amountReturned: true,
+        },
+      }),
+      // Same shape as completedTotals, but scoped to tasks that ended today —
+      // this is what the app's home-screen KPI header ("Completed / Distance /
+      // Time") actually shows, as distinct from the lifetime totals below.
+      this.prisma.task.aggregate({
+        where: {
+          officeBoyId: userId,
+          status: TaskStatus.COMPLETED,
+          endedAt: { gte: start, lt: end },
+        },
+        _sum: {
+          distanceMeters: true,
+          durationSeconds: true,
         },
       }),
       this.prisma.task.count({
@@ -235,6 +250,8 @@ export class TasksService {
       pendingSubmission,
       totalDistanceMeters: completedTotals._sum.distanceMeters ?? 0,
       totalDurationSeconds: completedTotals._sum.durationSeconds ?? 0,
+      todayDistanceMeters: completedTodayTotals._sum.distanceMeters ?? 0,
+      todayDurationSeconds: completedTodayTotals._sum.durationSeconds ?? 0,
       totalAmountReceived,
       totalAmountReturned,
       netAmount:

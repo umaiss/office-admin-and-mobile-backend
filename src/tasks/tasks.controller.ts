@@ -112,8 +112,10 @@ export class TasksController {
     description:
       "The caller's own headline numbers: task counts per status, completed " +
       'today, tasks still awaiting submission, total distance/duration over ' +
-      'completed tasks, cash received/returned, and reimbursement earned at the ' +
-      'rate in force when each task ended.',
+      'completed tasks (lifetime), distance/duration over tasks completed ' +
+      "today (todayDistanceMeters / todayDurationSeconds — what the home " +
+      'screen KPI header should display), cash received/returned, and ' +
+      'reimbursement earned at the rate in force when each task ended.',
   })
   @ApiForbiddenResponse({ description: 'Not an office boy.' })
   stats(@CurrentUser('userId') userId: string) {
