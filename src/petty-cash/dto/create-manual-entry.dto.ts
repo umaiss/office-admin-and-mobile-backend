@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsDateString,
   IsEnum,
@@ -37,6 +38,9 @@ export class CreateManualEntryDto {
     example: 'Printer ink cartridges and A4 paper restock',
     maxLength: 500,
   })
+  // Trimmed before validation: @IsNotEmpty rejects '' but not '   ', so a
+  // whitespace-only description would otherwise be stored as-is.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   @MaxLength(500)

@@ -125,6 +125,27 @@ export class PaginatedLedgerResponseDto {
   meta!: PaginationMetaDto;
 }
 
+/**
+ * How a month's entries divide between the two ways one can arrive.
+ *
+ * The dashboard reports the split under the entry count, because "84 entries"
+ * says nothing about whether the office boys or the admin did the work.
+ */
+export class EntrySourceCountsDto {
+  @ApiProperty({
+    example: 61,
+    description: 'Entries created by settling an office boy task.',
+  })
+  task!: number;
+
+  @ApiProperty({
+    example: 23,
+    description:
+      'Entries an admin recorded by hand, including those filed from a receipt scan.',
+  })
+  manual!: number;
+}
+
 export class MonthlySummaryResponseDto {
   @ApiProperty({ format: 'uuid' })
   id!: string;
@@ -144,8 +165,29 @@ export class MonthlySummaryResponseDto {
   @ApiProperty({ enum: OpeningBalanceSource })
   openingBalanceSource!: OpeningBalanceSource;
 
+  @ApiProperty({
+    example: '2026-08-01T04:12:55.000Z',
+    description:
+      'When this month was opened. The dashboard reports it as "Opened 1 Aug" — the day the float was actually set, which is not always the first of the month.',
+  })
+  openedAt!: string;
+
   @ApiProperty({ example: 2145.5 })
   totalExpenses!: number;
+
+  @ApiProperty({
+    example: 10000,
+    description:
+      'Sum of the TOP_UP adjustments recorded against this month. Reported separately from corrections because neither can be recovered from `remainingBalance` alone — a +10,000 top-up with a −2,000 correction nets to exactly the same figure as a single +8,000 top-up.',
+  })
+  totalTopUps!: number;
+
+  @ApiProperty({
+    example: 500,
+    description:
+      'Sum of the CORRECTION adjustments recorded against this month, always reported positive. Corrections subtract from the balance.',
+  })
+  totalCorrections!: number;
 
   @ApiProperty({ example: 2854.5 })
   remainingBalance!: number;
@@ -156,6 +198,32 @@ export class MonthlySummaryResponseDto {
       'Count of ledger entries in this month (calculated, not stored).',
   })
   totalEntries!: number;
+
+  @ApiProperty({
+    type: EntrySourceCountsDto,
+    description: 'The same total, split by how each entry arrived.',
+  })
+  entriesBySource!: EntrySourceCountsDto;
+
+  @ApiProperty({
+    example: 1,
+    description:
+      'How many adjustments make up `totalTopUps`. The dashboard needs the count to choose between naming a single top-up and summarising several.',
+  })
+  topUpCount!: number;
+
+  @ApiProperty({
+    example: 0,
+    description: 'How many adjustments make up `totalCorrections`.',
+  })
+  correctionCount!: number;
+
+  @ApiPropertyOptional({
+    example: '2026-08-12T09:30:00.000Z',
+    description:
+      'When the most recent top-up was recorded. Absent when the month has none.',
+  })
+  lastTopUpAt?: string;
 
   @ApiProperty()
   isClosed!: boolean;

@@ -11,6 +11,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "prisma:seed": "prisma db seed",
+    "admin:reset-password": "ts-node --transpile-only scripts/reset-admin-password.ts",
     "postinstall": "prisma generate",
     "prebuild": "prisma generate",
     "build": "nest build",

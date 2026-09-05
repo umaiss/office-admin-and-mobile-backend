@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "admin-panel",
+      "runtimeExecutable": "D:/Work/Backend/ob-track-backend/.claude/run-admin-panel.cmd",
+      "runtimeArgs": [],
+      "port": 5173
+    },
+    {
+      "name": "obtrack-api",
+      "runtimeExecutable": "D:/Work/Backend/ob-track-backend/.claude/run-api.cmd",
+      "runtimeArgs": [],
+      "port": 3000
+    }
+  ]
+}

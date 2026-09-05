@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsEnum,
   IsNotEmpty,
@@ -28,6 +29,9 @@ export class CreateAdjustmentDto {
     example: 'Emergency top-up approved for month-end courier rush',
     maxLength: 500,
   })
+  // Same reasoning as `description` on CreateManualEntryDto: the reason is
+  // the entire audit trail for a balance movement, and '   ' is not one.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   @MaxLength(500)

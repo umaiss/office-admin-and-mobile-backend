@@ -13,6 +13,7 @@ import { RefreshTokenService } from '../refresh-token/refresh-token.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { escapeLike } from '../common/search/escape-like';
 
 /**
  * The fields safe to return from an API.
@@ -246,8 +247,8 @@ export class UsersService {
     }
     return {
       OR: [
-        { name: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } },
+        { name: { contains: escapeLike(search), mode: 'insensitive' } },
+        { email: { contains: escapeLike(search), mode: 'insensitive' } },
       ],
     };
   }

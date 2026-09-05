@@ -43,10 +43,12 @@ describe('PettyCashService', () => {
       update: jest.Mock;
       delete: jest.Mock;
       aggregate: jest.Mock;
+      groupBy: jest.Mock;
     };
     pettyCashBalanceAdjustment: {
       create: jest.Mock;
       findMany: jest.Mock;
+      groupBy: jest.Mock;
     };
     pendingReceiptScan: {
       findUnique: jest.Mock;
@@ -84,6 +86,7 @@ describe('PettyCashService', () => {
     remainingBalance: decimal(5000),
     isClosed: false,
     note: null,
+    createdAt: new Date('2026-08-01T04:12:55.000Z'),
     ...overrides,
   });
 
@@ -139,10 +142,12 @@ describe('PettyCashService', () => {
         update: jest.fn().mockResolvedValue(entryRow()),
         delete: jest.fn().mockResolvedValue(entryRow()),
         aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }),
+        groupBy: jest.fn().mockResolvedValue([]),
       },
       pettyCashBalanceAdjustment: {
         create: jest.fn().mockResolvedValue({}),
         findMany: jest.fn().mockResolvedValue([]),
+        groupBy: jest.fn().mockResolvedValue([]),
       },
       pendingReceiptScan: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -672,7 +677,11 @@ describe('PettyCashService', () => {
 
     it('adds a TOP_UP to the remaining balance', async () => {
       prisma.pettyCashBalanceAdjustment.findMany.mockResolvedValue([
-        { type: 'TOP_UP', amount: decimal(500) },
+        {
+          type: 'TOP_UP',
+          amount: decimal(500),
+          createdAt: new Date('2026-08-12T09:30:00.000Z'),
+        },
       ]);
 
       await service.createAdjustment(
@@ -695,7 +704,11 @@ describe('PettyCashService', () => {
 
     it('subtracts a CORRECTION from the remaining balance', async () => {
       prisma.pettyCashBalanceAdjustment.findMany.mockResolvedValue([
-        { type: 'CORRECTION', amount: decimal(500) },
+        {
+          type: 'CORRECTION',
+          amount: decimal(500),
+          createdAt: new Date('2026-08-12T09:30:00.000Z'),
+        },
       ]);
 
       await service.createAdjustment(
@@ -710,6 +723,139 @@ describe('PettyCashService', () => {
       };
       // 5000 opening − 500 correction − 1000 spent
       expect(Number(update.data.remainingBalance)).toBe(3500);
+    });
+  });
+
+  describe('closeMonth / reopenMonth', () => {
+    it('closes an open month', async () => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(ledgerRow());
+
+      await service.closeMonth(2026, 8);
+
+      expect(prisma.pettyCashMonthlyLedger.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { isClosed: true } }),
+      );
+    });
+
+    it('refuses to close a month that is already closed', async () => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(
+        ledgerRow({ isClosed: true }),
+      );
+
+      await expect(service.closeMonth(2026, 8)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.pettyCashMonthlyLedger.update).not.toHaveBeenCalled();
+    });
+
+    it('reopens a closed month, so a late settlement can still land', async () => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(
+        ledgerRow({ isClosed: true }),
+      );
+
+      await service.reopenMonth(2026, 8);
+
+      expect(prisma.pettyCashMonthlyLedger.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { isClosed: false } }),
+      );
+    });
+
+    it('refuses to reopen a month that was never closed', async () => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(ledgerRow());
+
+      await expect(service.reopenMonth(2026, 8)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.pettyCashMonthlyLedger.update).not.toHaveBeenCalled();
+    });
+
+    it('404s for a month that was never opened', async () => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(null);
+
+      await expect(service.closeMonth(2026, 8)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('getMonthlySummary — adjustment totals', () => {
+    beforeEach(() => {
+      prisma.pettyCashMonthlyLedger.findUnique.mockResolvedValue(ledgerRow());
+      prisma.pettyCashLedgerEntry.count.mockResolvedValue(3);
+    });
+
+    it('reports top-ups and corrections separately, not netted', async () => {
+      prisma.pettyCashBalanceAdjustment.findMany.mockResolvedValue([
+        {
+          type: 'TOP_UP',
+          amount: decimal(10000),
+          createdAt: new Date('2026-08-12T09:30:00.000Z'),
+        },
+        {
+          type: 'CORRECTION',
+          amount: decimal(2000),
+          createdAt: new Date('2026-08-05T09:30:00.000Z'),
+        },
+      ]);
+
+      const summary = await service.getMonthlySummary(2026, 8);
+
+      // Netting these to +8000 would make the two indistinguishable from a
+      // single top-up, which is exactly what the dashboard must not show.
+      expect(summary.totalTopUps).toBe(10000);
+      expect(summary.totalCorrections).toBe(2000);
+      expect(summary.topUpCount).toBe(1);
+      expect(summary.correctionCount).toBe(1);
+    });
+
+    it('reports the date of the most recent top-up, not the oldest', async () => {
+      prisma.pettyCashBalanceAdjustment.findMany.mockResolvedValue([
+        {
+          type: 'TOP_UP',
+          amount: decimal(4000),
+          createdAt: new Date('2026-08-20T09:30:00.000Z'),
+        },
+        {
+          type: 'TOP_UP',
+          amount: decimal(6000),
+          createdAt: new Date('2026-08-03T09:30:00.000Z'),
+        },
+      ]);
+
+      const summary = await service.getMonthlySummary(2026, 8);
+
+      expect(summary.totalTopUps).toBe(10000);
+      expect(summary.topUpCount).toBe(2);
+      expect(summary.lastTopUpAt).toBe('2026-08-20T09:30:00.000Z');
+    });
+
+    it('reports zero for a month with no adjustments', async () => {
+      prisma.pettyCashBalanceAdjustment.findMany.mockResolvedValue([]);
+
+      const summary = await service.getMonthlySummary(2026, 8);
+
+      expect(summary.totalTopUps).toBe(0);
+      expect(summary.totalCorrections).toBe(0);
+      expect(summary.topUpCount).toBe(0);
+      expect(summary.lastTopUpAt).toBeUndefined();
+    });
+
+    it('splits the entry count by source, and totals it from the split', async () => {
+      prisma.pettyCashLedgerEntry.groupBy.mockResolvedValue([
+        { source: 'TASK', _count: { _all: 61 } },
+        { source: 'MANUAL', _count: { _all: 23 } },
+      ]);
+
+      const summary = await service.getMonthlySummary(2026, 8);
+
+      expect(summary.entriesBySource).toEqual({ task: 61, manual: 23 });
+      expect(summary.totalEntries).toBe(84);
+    });
+
+    it('reports when the month was opened', async () => {
+      const summary = await service.getMonthlySummary(2026, 8);
+
+      expect(summary.openedAt).toBe('2026-08-01T04:12:55.000Z');
     });
   });
 

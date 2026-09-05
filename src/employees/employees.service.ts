@@ -13,6 +13,7 @@ import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { HoursSavedQueryDto } from './dto/hours-saved-query.dto';
 import { ListEmployeesQueryDto } from './dto/list-employees-query.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
+import { escapeLike } from '../common/search/escape-like';
 
 /**
  * The fields returned for an employee.
@@ -439,8 +440,8 @@ export class EmployeesService {
     }
     return {
       OR: [
-        { name: { contains: search, mode: 'insensitive' } },
-        { department: { contains: search, mode: 'insensitive' } },
+        { name: { contains: escapeLike(search), mode: 'insensitive' } },
+        { department: { contains: escapeLike(search), mode: 'insensitive' } },
       ],
     };
   }

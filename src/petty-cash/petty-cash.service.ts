@@ -12,6 +12,7 @@ import { buildPaginationMeta } from '../common/pagination/paginate';
 import { AppConfigService } from '../config/app-config.service';
 import { Prisma } from '../generated/prisma/client';
 import {
+  AdjustmentType,
   LedgerEntrySource,
   OpeningBalanceSource,
   PettyCashCategory,
@@ -40,6 +41,7 @@ import {
   ReceiptExtraction,
   ReceiptExtractionService,
 } from './receipt-extraction.service';
+import { escapeLike } from '../common/search/escape-like';
 
 const MONTH_NAMES = [
   'January',
@@ -212,7 +214,62 @@ export class PettyCashService {
       });
     });
 
-    return this.toMonthlySummaryDto(created, 0);
+    return this.toMonthlySummaryDto(created);
+  }
+
+  /**
+   * Closes a month by hand.
+   *
+   * Carrying a balance forward closes the month it came from automatically,
+   * which covers the ordinary path. This covers the other one: a month opened
+   * with a manual figure leaves its predecessor open, and until now nothing
+   * in the API could ever close it again — `isClosed` was written in exactly
+   * one place, inside the carry-forward branch.
+   *
+   * Closing is a soft lock, not a freeze. It stops task settlements and
+   * auto-filed scans from landing in the month; an admin can still add,
+   * correct and adjust, because that is what month-end reconciliation is.
+   */
+  async closeMonth(
+    year: number,
+    month: number,
+  ): Promise<MonthlySummaryResponseDto> {
+    const ledger = await this.requireMonth(year, month);
+    if (ledger.isClosed) {
+      throw new ConflictException(
+        `${formatMonth(year, month)} is already closed.`,
+      );
+    }
+
+    await this.prisma.pettyCashMonthlyLedger.update({
+      where: { id: ledger.id },
+      data: { isClosed: true },
+    });
+    return this.getMonthlySummary(year, month);
+  }
+
+  /**
+   * Reopens a closed month.
+   *
+   * The error raised when a task settles into a closed month tells the admin
+   * to "reopen it or record this as a manual entry" — advice that was
+   * impossible to follow, because no reopen existed. A late settlement is a
+   * normal thing to happen, so the instruction is now actionable.
+   */
+  async reopenMonth(
+    year: number,
+    month: number,
+  ): Promise<MonthlySummaryResponseDto> {
+    const ledger = await this.requireMonth(year, month);
+    if (!ledger.isClosed) {
+      throw new ConflictException(`${formatMonth(year, month)} is already open.`);
+    }
+
+    await this.prisma.pettyCashMonthlyLedger.update({
+      where: { id: ledger.id },
+      data: { isClosed: false },
+    });
+    return this.getMonthlySummary(year, month);
   }
 
   async getMonthlySummary(
@@ -220,10 +277,11 @@ export class PettyCashService {
     month: number,
   ): Promise<MonthlySummaryResponseDto> {
     const ledger = await this.requireMonth(year, month);
-    const totalEntries = await this.prisma.pettyCashLedgerEntry.count({
-      where: { monthlyLedgerId: ledger.id },
-    });
-    return this.toMonthlySummaryDto(ledger, totalEntries);
+    const [adjustments, entriesBySource] = await Promise.all([
+      this.summariseAdjustments(ledger.id),
+      this.countEntriesBySource(ledger.id),
+    ]);
+    return this.toMonthlySummaryDto(ledger, adjustments, entriesBySource);
   }
 
   private async findPreviousMonth(
@@ -298,8 +356,8 @@ export class PettyCashService {
     }
     if (query.search) {
       where.OR = [
-        { description: { contains: query.search, mode: 'insensitive' } },
-        { supplier: { contains: query.search, mode: 'insensitive' } },
+        { description: { contains: escapeLike(query.search), mode: 'insensitive' } },
+        { supplier: { contains: escapeLike(query.search), mode: 'insensitive' } },
       ];
     }
 
@@ -357,18 +415,50 @@ export class PettyCashService {
     const ledgerIds = [...new Set(all.map((e) => e.monthlyLedgerId))];
     const ledgers = await db.pettyCashMonthlyLedger.findMany({
       where: { id: { in: ledgerIds } },
-      select: { id: true, openingBalance: true },
+      select: {
+        id: true,
+        openingBalance: true,
+        adjustments: { select: { type: true, amount: true } },
+      },
     });
-    const openingByLedger = new Map(
-      ledgers.map((l) => [l.id, Number(l.openingBalance)]),
+
+    // The walk starts from the month's *funded* position — opening plus the
+    // net of its adjustments — not from the opening balance alone.
+    //
+    // Starting at the opening balance made the column fail to reconcile: the
+    // newest row landed on `opening − expenses` while every other figure on
+    // the screen (the Remaining balance card, the report's Closing balance)
+    // showed `opening + top-ups − corrections − expenses`. A ledger whose own
+    // balance column disagrees with its closing balance is worse than useless
+    // to someone reconciling it.
+    //
+    // Adjustments are folded in up front rather than interleaved by date:
+    // they carry a `createdAt` timestamp while entries carry an `entryDate`,
+    // and ordering a date against a timestamp is arbitrary within a day. The
+    // trade is that a mid-month top-up shows from the first row rather than
+    // from the row it happened at — in exchange, the column always adds up.
+    const startByLedger = new Map(
+      ledgers.map((ledger) => {
+        const net = ledger.adjustments.reduce(
+          (sum, adjustment) =>
+            adjustment.type === AdjustmentType.TOP_UP
+              ? sum.plus(adjustment.amount)
+              : sum.minus(adjustment.amount),
+          new Prisma.Decimal(0),
+        );
+        return [ledger.id, Number(new Prisma.Decimal(ledger.openingBalance).plus(net))];
+      }),
     );
 
     const running = new Map<string, number>();
     const runningTotals = new Map<string, number>();
     for (const entry of all) {
-      const opening = openingByLedger.get(entry.monthlyLedgerId) ?? 0;
-      const prevTotal = runningTotals.get(entry.monthlyLedgerId) ?? opening;
-      const next = prevTotal - Number(entry.amount);
+      const start = startByLedger.get(entry.monthlyLedgerId) ?? 0;
+      const prevTotal = runningTotals.get(entry.monthlyLedgerId) ?? start;
+      // Rounded every step: these are two-decimal money values, and letting
+      // binary floating point accumulate across a few hundred rows produces
+      // balances like 105356.99999999999.
+      const next = Math.round((prevTotal - Number(entry.amount)) * 100) / 100;
       runningTotals.set(entry.monthlyLedgerId, next);
       running.set(entry.id, next);
     }
@@ -1143,6 +1233,84 @@ export class PettyCashService {
     });
   }
 
+  /**
+   * Top-ups and corrections, reported separately and in detail.
+   *
+   * The ledger caches only the *net* of the two, inside `remainingBalance`,
+   * which is enough to reconcile a month but not enough to report one:
+   * +10,000 of top-ups against −2,000 of corrections is indistinguishable
+   * from a single +8,000 top-up.
+   *
+   * Read as rows rather than aggregated in SQL because the dashboard wants
+   * the count and the latest date as well as the sum, and a month holds a
+   * handful of adjustments at most — the covering index on
+   * (monthlyLedgerId, createdAt) makes this one cheap seek.
+   */
+  private async summariseAdjustments(monthlyLedgerId: string): Promise<{
+    topUps: number;
+    corrections: number;
+    topUpCount: number;
+    correctionCount: number;
+    lastTopUpAt?: string;
+  }> {
+    const rows = await this.prisma.pettyCashBalanceAdjustment.findMany({
+      where: { monthlyLedgerId },
+      select: { type: true, amount: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const of = (type: AdjustmentType) => rows.filter((row) => row.type === type);
+    const sum = (list: typeof rows) =>
+      Number(
+        list.reduce(
+          (total, row) => total.plus(row.amount),
+          new Prisma.Decimal(0),
+        ),
+      );
+
+    const topUps = of(AdjustmentType.TOP_UP);
+    const corrections = of(AdjustmentType.CORRECTION);
+
+    return {
+      topUps: sum(topUps),
+      corrections: sum(corrections),
+      topUpCount: topUps.length,
+      correctionCount: corrections.length,
+      // Newest first, so the head of the list is the most recent top-up.
+      lastTopUpAt: topUps[0]?.createdAt.toISOString(),
+    };
+  }
+
+  /**
+   * How many of the month's entries came from a task versus an admin.
+   *
+   * Also supplies `totalEntries` — the two counts always sum to it, so
+   * counting separately would be a second query that could disagree.
+   */
+  private async countEntriesBySource(
+    monthlyLedgerId: string,
+  ): Promise<{ task: number; manual: number }> {
+    const grouped = await this.prisma.pettyCashLedgerEntry.groupBy({
+      by: ['source'],
+      where: { monthlyLedgerId },
+      _count: { _all: true },
+    });
+
+    // Prisma widens `_count` to a union here; for `_count: { _all: true }`
+    // the runtime shape is always `{ _all: number }`.
+    const rows = grouped as unknown as {
+      source: LedgerEntrySource;
+      _count: { _all: number };
+    }[];
+    const countOf = (source: LedgerEntrySource) =>
+      rows.find((row) => row.source === source)?._count._all ?? 0;
+
+    return {
+      task: countOf(LedgerEntrySource.TASK),
+      manual: countOf(LedgerEntrySource.MANUAL),
+    };
+  }
+
   private toMonthlySummaryDto(
     ledger: {
       id: string;
@@ -1154,8 +1322,18 @@ export class PettyCashService {
       remainingBalance: Prisma.Decimal;
       isClosed: boolean;
       note: string | null;
+      createdAt: Date;
     },
-    totalEntries: number,
+    // A month that has just been opened has neither adjustments nor entries,
+    // which is exactly what these defaults describe.
+    adjustments: {
+      topUps: number;
+      corrections: number;
+      topUpCount: number;
+      correctionCount: number;
+      lastTopUpAt?: string;
+    } = { topUps: 0, corrections: 0, topUpCount: 0, correctionCount: 0 },
+    entriesBySource: { task: number; manual: number } = { task: 0, manual: 0 },
   ): MonthlySummaryResponseDto {
     return new MonthlySummaryResponseDto({
       id: ledger.id,
@@ -1163,9 +1341,16 @@ export class PettyCashService {
       month: ledger.month,
       openingBalance: Number(ledger.openingBalance),
       openingBalanceSource: ledger.openingBalanceSource as OpeningBalanceSource,
+      openedAt: ledger.createdAt.toISOString(),
       totalExpenses: Number(ledger.totalExpenses),
+      totalTopUps: adjustments.topUps,
+      totalCorrections: adjustments.corrections,
+      topUpCount: adjustments.topUpCount,
+      correctionCount: adjustments.correctionCount,
+      lastTopUpAt: adjustments.lastTopUpAt,
       remainingBalance: Number(ledger.remainingBalance),
-      totalEntries,
+      totalEntries: entriesBySource.task + entriesBySource.manual,
+      entriesBySource,
       isClosed: ledger.isClosed,
       note: ledger.note ?? undefined,
     });

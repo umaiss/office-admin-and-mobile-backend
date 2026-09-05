@@ -163,7 +163,48 @@ export class PettyCashController {
     return this.pettyCashService.createAdjustment(year, month, dto, adminId);
   }
 
-  // ----------------------------------------------------------------
+  @Post('months/:year/:month/close')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Close a month',
+    description:
+      'Locks a month against new automated entries once its paperwork is done. Opening the next month with a carry-forward closes this one for you; this route is for the other case, where the next month was opened with a manual figure and left its predecessor open. Closing is deliberately a soft lock — task settlements and auto-filed scans are refused, but an admin can still add entries, correct existing ones and record adjustments, because month-end reconciliation happens after the close.',
+  })
+  @ApiParam({ name: 'year', example: 2026 })
+  @ApiParam({ name: 'month', example: 10, description: '1-12' })
+  @ApiOkResponse({ type: MonthlySummaryResponseDto })
+  @ApiBadRequestResponse({ description: 'Year or month is not a valid number.' })
+  @ApiNotFoundResponse({ description: 'No ledger open for this month.' })
+  @ApiConflictResponse({ description: 'This month is already closed.' })
+  closeMonth(
+    @Param('year', ParseIntPipe) year: number,
+    @Param('month', ParseIntPipe) month: number,
+  ): Promise<MonthlySummaryResponseDto> {
+    assertMonth(year, month);
+    return this.pettyCashService.closeMonth(year, month);
+  }
+
+  @Post('months/:year/:month/reopen')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reopen a closed month',
+    description:
+      'Lets task settlements and scans land in the month again. Use it when an errand is settled late, after the month was closed — the alternative is booking that spend by hand into the current month, which files it in the wrong period.',
+  })
+  @ApiParam({ name: 'year', example: 2026 })
+  @ApiParam({ name: 'month', example: 10, description: '1-12' })
+  @ApiOkResponse({ type: MonthlySummaryResponseDto })
+  @ApiBadRequestResponse({ description: 'Year or month is not a valid number.' })
+  @ApiNotFoundResponse({ description: 'No ledger open for this month.' })
+  @ApiConflictResponse({ description: 'This month is not closed.' })
+  reopenMonth(
+    @Param('year', ParseIntPipe) year: number,
+    @Param('month', ParseIntPipe) month: number,
+  ): Promise<MonthlySummaryResponseDto> {
+    assertMonth(year, month);
+    return this.pettyCashService.reopenMonth(year, month);
+  }
+
   //  Ledger entries
   // ----------------------------------------------------------------
 
@@ -223,7 +264,11 @@ export class PettyCashController {
   @ApiCreatedResponse({ type: LedgerEntryResponseDto })
   @ApiBadRequestResponse({
     description:
-      "Validation failed (see field-level errors), or no ledger open for the entry's month.",
+      'Validation failed — see the field-level errors.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      "No ledger is open for the entry's month. Open that month before recording spend against it.",
   })
   createManualEntry(
     @Body() dto: CreateManualEntryDto,
@@ -279,11 +324,12 @@ export class PettyCashController {
   })
   @ApiQuery({ name: 'uploadToken', example: 'upl_9f8c2e1a4b3d' })
   @ApiCreatedResponse({ type: LedgerEntryResponseDto })
-  @ApiNotFoundResponse({
-    description: 'Upload token not found or expired — re-upload the receipt.',
-  })
   @ApiBadRequestResponse({
-    description: "Validation failed, or no ledger open for the entry's month.",
+    description: 'Validation failed — see the field-level errors.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      "Upload token not found or expired, or no ledger is open for the entry's month.",
   })
   confirmScanEntry(
     @Query('uploadToken') uploadToken: string,
@@ -301,9 +347,12 @@ export class PettyCashController {
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ type: LedgerEntryResponseDto })
-  @ApiNotFoundResponse({ description: 'Entry not found.' })
   @ApiBadRequestResponse({
-    description: 'Validation failed, or the target month has no ledger open.',
+    description: 'Validation failed — see the field-level errors.',
+  })
+  @ApiNotFoundResponse({
+    description:
+      'Entry not found, or the month its new entryDate falls in has no ledger open.',
   })
   updateEntry(
     @Param('id', ParseUUIDPipe) id: string,

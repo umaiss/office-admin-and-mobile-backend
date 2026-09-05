@@ -1,5 +1,6 @@
 import { Prisma } from '../generated/prisma/client';
 import { TaskStatus } from '../generated/prisma/enums';
+import { escapeLike } from '../common/search/escape-like';
 
 /**
  * Everything a caller can narrow a task list by.
@@ -85,10 +86,10 @@ export function searchClause(search?: string): Prisma.TaskWhereInput {
   }
   return {
     OR: [
-      { title: { contains: search, mode: 'insensitive' } },
-      { description: { contains: search, mode: 'insensitive' } },
-      { destination: { contains: search, mode: 'insensitive' } },
-      { vendorDetails: { contains: search, mode: 'insensitive' } },
+      { title: { contains: escapeLike(search), mode: 'insensitive' } },
+      { description: { contains: escapeLike(search), mode: 'insensitive' } },
+      { destination: { contains: escapeLike(search), mode: 'insensitive' } },
+      { vendorDetails: { contains: escapeLike(search), mode: 'insensitive' } },
     ],
   };
 }

@@ -35,6 +35,7 @@ import { EndTaskDto } from './dto/end-task.dto';
 import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
 import { LocationPointDto } from './dto/location-point.dto';
 import { SettlementDto } from './dto/settlement.dto';
+import { deviceTime, endedNotBefore } from './device-time';
 import { buildTaskWhere } from './task-filters';
 
 export const TASK_SELECT = {
@@ -284,7 +285,7 @@ export class TasksService {
       where: { id: taskId },
       data: {
         status: TaskStatus.IN_PROGRESS,
-        startedAt: new Date(),
+        startedAt: deviceTime(dto.recordedAt),
         startLatitude: dto.latitude,
         startLongitude: dto.longitude,
       },
@@ -341,7 +342,10 @@ export class TasksService {
       );
     }
 
-    const endedAt = new Date();
+    // The phone's clock, not the server's: the errand happened when the
+    // office boy was standing there, which may be hours before the request
+    // reaches us. See `device-time.ts` for the bounds this is trusted within.
+    const endedAt = endedNotBefore(deviceTime(dto.recordedAt), task.startedAt);
     const durationSeconds = task.startedAt
       ? Math.max(
           0,
