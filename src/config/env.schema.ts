@@ -150,6 +150,7 @@ export const envSchema = z.object({
     .default(5_242_880),
 
   // ---- Receipt extraction (Claude) -----------------------------------------
+
   // Optional on purpose. Without a key the scan endpoint still works — it
   // stores the receipt and returns no suggestions, exactly as it did before
   // extraction existed — so a missing key degrades the feature rather than
